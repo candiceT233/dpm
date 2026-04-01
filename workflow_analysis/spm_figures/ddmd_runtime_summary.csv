@@ -1,0 +1,5 @@
+scheduling_method,storage_config,total_runtime_seconds,aggregate_seconds,inference_seconds,openmm_seconds,training_seconds
+dagP,BeeGFS 4n,153.19,45.18,53.42,67.77,85.42
+DFMan,SSD 4n,178.27,57.21,67.79,85.82,92.45
+FaasFlow,SSD 2n,150.54,45.80,50.43,68.70,81.85
+DPM,SSD 2n (TMPFS equivalent),150.54,45.80,50.43,68.70,81.85

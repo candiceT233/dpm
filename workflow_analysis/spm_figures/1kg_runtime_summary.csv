@@ -1,0 +1,5 @@
+scheduling_method,storage_config,total_runtime_seconds,frequency_seconds,individuals_seconds,merge_seconds,mutation_seconds,sifting_seconds
+dagP,BeeGFS 15n,3023.72,98.00,293.26,2096.00,98.00,438.46
+DFMan,SSD 15n / BeeGFS 15n,1518.20,98.00,45.90,1055.50,98.00,220.80
+DPM,TMPFS 10n,130.88,66.68,27.54,35.97,5.95,36.65
+FaasFlow,SSD 2n,338.57,73.56,224.61,39.57,6.41,40.40
