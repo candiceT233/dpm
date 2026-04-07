@@ -21,33 +21,70 @@ sacctmgr show user $(whoami) withassoc format=user,account,partition -p 2>/dev/n
   echo "Try: squeue --me or check with cluster admin"
 ```
 
-### Find partitions and node specs
+### Find partitions and node names
 
 ```bash
-# List available partitions
+# List available partitions and node counts
 sinfo -o "%P %a %l %D %C" 2>/dev/null | head -30
 
-# Inspect a specific partition (replace PARTITION_NAME with one from sinfo)
+# List actual node names in each partition (you need a specific node name for the probe job below)
 sinfo -p PARTITION_NAME -o "%N %m %c %G" | head -20
 
-# Check memory and CPU on available nodes
-scontrol show node | grep -E "NodeName|CfgTRES|FreeTRES|AvailableFeatures" | head -60
+# Get node names only (pick one to use in the probe job)
+sinfo -p PARTITION_NAME -o "%N" | head -10
 ```
 
-### Find storage paths
+> **WARNING**: `scontrol show node` on the head/login node reports login node specs,
+> not compute node specs. RAM, CPU count, and storage mounts on compute nodes may differ.
+> Always use the probe job below to get accurate compute node specs.
+
+### Probe a compute node for actual specs (required)
+
+Submit a short job to get real compute node hardware info. Replace `PARTITION_NAME`,
+`ACCOUNT_NAME`, and optionally `NODE_NAME` (from `sinfo` above) with actual values:
 
 ```bash
-# Look for local SSD (node-local scratch)
-# Common mount points: /local, /local/scratch, /nvme, /scratch, /tmp/scratch
-ls /local/ /nvme/ /scratch/ 2>/dev/null
-df -h 2>/dev/null | grep -E "local|nvme|scratch|shm"
+sbatch --partition=PARTITION_NAME \
+       --account=ACCOUNT_NAME \
+       --nodes=1 --ntasks=1 --time=00:05:00 \
+       --nodelist=NODE_NAME \
+       --output=/tmp/node_probe_%j.out \
+       --wrap="
+echo '=== Node: ' \$(hostname)
+echo '=== CPUs:' \$(nproc)
+echo '=== RAM:'
+free -h
+echo '=== Storage mounts:'
+df -hT | grep -v tmpfs | grep -v overlay
+echo '=== Local scratch (check common paths):'
+ls /local/ /local/scratch/ /nvme/ /scratch/ 2>/dev/null || echo 'none found'
+echo '=== TMPFS (/dev/shm):'
+df -h /dev/shm
+echo '=== Loaded modules:'
+module list 2>&1
+"
 
-# Look for shared file system (BeeGFS/Lustre/GPFS)
+# Wait for it to finish (usually under 1 minute), then read output:
+# squeue --me   # watch until job disappears
+# cat /tmp/node_probe_JOBID.out
+```
+
+Record from the output:
+- **RAM**: the `Mem:` total line from `free -h` → set as `MEM_PER_NODE_GB`
+- **CPUs**: `nproc` output → set as `CORES_PER_NODE`
+- **Node name**: `hostname` output → needed for `--nodelist` in experiment jobs
+- **Local SSD path**: whichever of `/local/scratch`, `/nvme`, etc. exists and has space
+- **Shared FS path**: from `df -hT` output (beegfs/lustre/gpfs line)
+
+### Find storage paths (head node only — verify on compute node via probe job above)
+
+```bash
+# Shared file system is usually visible from head node too
 df -hT 2>/dev/null | grep -E "beegfs|lustre|gpfs|nfs|panfs"
 # Common shared paths: /rcfs/projects/*, /global/project/*, /lustre/*, /gpfs/*
 
-# TMPFS is usually /dev/shm, verify:
-df -h /dev/shm
+# Note: LOCAL_SSD_PATH and TMPFS_PATH must be verified on a compute node.
+# The probe job above checks these — do not assume head node mounts match compute nodes.
 ```
 
 ### Find software modules
@@ -282,18 +319,21 @@ sbatch --partition=PARTITION --nodes=1 --wrap="ls -la /local/scratch || echo MIS
 
 Once you discover your cluster's values (Step 0), record them here for reference:
 
-| Variable        | Value (fill in) |
-|-----------------|-----------------|
-| Cluster name    | TODO            |
-| Partition       | TODO            |
-| Account         | TODO            |
-| Nodes available | TODO            |
-| Cores per node  | TODO            |
-| RAM per node    | TODO GB         |
-| Local SSD path  | TODO            |
-| Shared FS path  | TODO            |
-| ADIOS2 module   | TODO            |
-| Conda env path  | TODO            |
+| Variable              | Value (fill in) | Source                        |
+|-----------------------|-----------------|-------------------------------|
+| Cluster name          | TODO            | hostname on login node        |
+| Partition             | TODO            | sinfo                         |
+| Account               | TODO            | sacctmgr / groups             |
+| Example node name     | TODO            | sinfo -o "%N" (for probe job) |
+| Nodes available       | TODO            | sinfo                         |
+| Cores per node        | TODO            | probe job: nproc              |
+| RAM per node          | TODO GB         | probe job: free -h            |
+| Local SSD path        | TODO            | probe job: ls /local /nvme    |
+| Local SSD capacity    | TODO GB         | probe job: df -h              |
+| Shared FS path        | TODO            | df -hT on login node          |
+| TMPFS size (/dev/shm) | TODO GB         | probe job: df -h /dev/shm     |
+| ADIOS2 module         | TODO            | module avail adios2           |
+| Conda env path        | TODO            | conda env list                |
 
 ---
 
