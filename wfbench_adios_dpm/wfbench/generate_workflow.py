@@ -188,14 +188,17 @@ def main():
     )
     parser.add_argument("--size", choices=["small", "medium", "large"], required=True)
     parser.add_argument("--nodes", type=int, default=4)
-    parser.add_argument("--tasks-per-node", type=int, default=2)
-    parser.add_argument("--mem-per-node", type=float, default=384.0,
-                        help="Node RAM in GB (set from config.env MEM_PER_NODE_GB)")
+    parser.add_argument("--tasks-per-node", type=int,
+                        default=int(os.environ.get("TASKS_PER_NODE", 2)))
+    parser.add_argument("--mem-per-node", type=float,
+                        default=float(os.environ.get("MEM_PER_NODE_GB", 384.0)),
+                        help="Node RAM in GB (reads MEM_PER_NODE_GB from env if not set)")
     parser.add_argument("--output", type=str, default=None,
-                        help="Output JSON file (default: workflow_{size}.json)")
+                        help="Output JSON file (default: workflow_{size}_{nodes}n.json)")
     args = parser.parse_args()
 
-    output_file = args.output or f"workflow_{args.size}.json"
+    # Include node count in filename so phase 3 scaling runs have separate JSONs
+    output_file = args.output or f"workflow_{args.size}_{args.nodes}n.json"
 
     workflow = generate_workflow(
         size=args.size,

@@ -59,12 +59,12 @@ cat > "${JOB_SCRIPT}" << SLURM_EOF
 #!/bin/bash
 #SBATCH --job-name=adios_sst_${SIZE}
 #SBATCH --partition=${PARTITION}
+#SBATCH --account=${ACCOUNT}
 #SBATCH --nodes=${NODES}
 #SBATCH --ntasks-per-node=${CORES_PER_NODE}
 #SBATCH --time=02:00:00
 #SBATCH --output=${RESULTS_DIR}/slurm_%j.out
 #SBATCH --error=${RESULTS_DIR}/slurm_%j.err
-# TODO: add account, reservation, or other cluster-specific SBATCH flags
 
 source ${ROOT_DIR}/config.env
 source ${PYTHON_ENV}/bin/activate 2>/dev/null || true
@@ -114,12 +114,21 @@ for pid in "\${CONSUMER_PIDS[@]}"; do
 done
 
 T_END=\$(date +%s)
+# Stage 1 and 2 ran simultaneously — report combined as stage1, 0 for stage2, stage3
+STAGE1_TIME=\$((T_END - T_STAGE1_START))
+STAGE2_TIME=0   # overlapped with stage1 in SST mode
+STAGE3_TIME=0   # no stage3 in ADIOS SST run
 TOTAL_TIME=\$((T_END - T_STAGE1_START))
 
-echo "RESULT: size=${SIZE}, backend=adios_sst, nodes=${NODES}" >> "${RESULTS_DIR}/result.txt"
-echo "total_time_s=\${TOTAL_TIME}"  >> "${RESULTS_DIR}/result.txt"
-echo "failed_tasks=\${FAILED}"      >> "${RESULTS_DIR}/result.txt"
-echo "status=\$([ \${FAILED} -eq 0 ] && echo SUCCESS || echo FAILED)" >> "${RESULTS_DIR}/result.txt"
+{
+echo "RESULT: size=${SIZE}, backend=adios_sst, nodes=${NODES}"
+echo "stage1_time_s=\${STAGE1_TIME}"
+echo "stage2_time_s=\${STAGE2_TIME}"
+echo "stage3_time_s=\${STAGE3_TIME}"
+echo "total_time_s=\${TOTAL_TIME}"
+echo "failed_tasks=\${FAILED}"
+echo "status=\$([ \${FAILED} -eq 0 ] && echo SUCCESS || echo FAILED)"
+} >> "${RESULTS_DIR}/result.txt"
 
 cat "${RESULTS_DIR}/result.txt"
 

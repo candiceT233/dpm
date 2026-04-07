@@ -243,17 +243,43 @@ PYTHON_ENV=$(python -c "import sys; print(sys.prefix)")
 
 ## Step 3: Generate Workflow JSON Files
 
+Generate one JSON per (size, node count) combination. The JSON encodes actual byte
+sizes based on node RAM, so each node-count scaling run has its own JSON.
+
 ```bash
-source config.env          # loads MEM_PER_NODE_GB
+source config.env   # loads MEM_PER_NODE_GB, TASKS_PER_NODE, NODES, MAX_NODES
 cd wfbench/
-python generate_workflow.py --size small   # ~5% of node RAM
-python generate_workflow.py --size medium  # ~30% of node RAM
-python generate_workflow.py --size large   # ~80% of node RAM (ADIOS SST should fail here)
-ls -lh workflow_*.json     # confirm created
+
+# Phase 1+2: data-size sweep at 4 nodes
+for SIZE in small medium large; do
+    python generate_workflow.py --size ${SIZE} --nodes 4
+done
+
+# Phase 3: node-count scaling (large data only)
+for N in 8 16 32; do
+    python generate_workflow.py --size large --nodes ${N}
+done
+
+ls -lh workflow_*.json   # confirm all generated
 ```
 
-The generator reads `MEM_PER_NODE_GB` from environment to set absolute data sizes.
-If that variable is not set, it defaults to 128 GB.
+`generate_workflow.py` reads `MEM_PER_NODE_GB` and `TASKS_PER_NODE` from the
+environment automatically (set by `source config.env`). Output filenames are
+`workflow_{size}_{nodes}n.json` (e.g. `workflow_large_32n.json`).
+
+Verify the large-data file size makes sense for your node RAM:
+```bash
+python3 -c "
+import json, os
+wf = json.load(open('workflow_large_4n.json'))
+gb = wf['dpmMeta']['stage1FileSizeBytes'] / 1024**3
+total = wf['dpmMeta']['totalIntermediateBytes'] / 1024**3
+mem = float(os.environ.get('MEM_PER_NODE_GB', 0))
+print(f'Stage1 per task: {gb:.1f} GB  (node RAM: {mem} GB, fraction: {gb/mem:.0%})')
+print(f'Total intermediate: {total:.1f} GB')
+"
+```
+The large config should be ~80% of node RAM per task — enough to saturate SST buffers.
 
 ---
 
