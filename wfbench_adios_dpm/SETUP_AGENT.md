@@ -1,0 +1,315 @@
+# SETUP_AGENT.md — Onboarding Guide for New Cluster Environment
+
+This file is written for an AI agent or human who is setting up this evaluation from scratch
+on a new HPC cluster. It covers: discovering the cluster environment, filling in config,
+setting up software dependencies, and submitting Slurm jobs.
+
+---
+
+## Step 0: Discover Cluster Environment
+
+Run the following commands to collect the information needed to fill in `config.env`.
+
+### Identify yourself and your allocations
+
+```bash
+# Who are you and what accounts are available
+whoami
+groups
+sacctmgr show user $(whoami) withassoc format=user,account,partition -p 2>/dev/null || \
+  sshare -u $(whoami) 2>/dev/null || \
+  echo "Try: squeue --me or check with cluster admin"
+```
+
+### Find partitions and node specs
+
+```bash
+# List available partitions
+sinfo -o "%P %a %l %D %C" 2>/dev/null | head -30
+
+# Inspect a specific partition (replace PARTITION_NAME with one from sinfo)
+sinfo -p PARTITION_NAME -o "%N %m %c %G" | head -20
+
+# Check memory and CPU on available nodes
+scontrol show node | grep -E "NodeName|CfgTRES|FreeTRES|AvailableFeatures" | head -60
+```
+
+### Find storage paths
+
+```bash
+# Look for local SSD (node-local scratch)
+# Common mount points: /local, /local/scratch, /nvme, /scratch, /tmp/scratch
+ls /local/ /nvme/ /scratch/ 2>/dev/null
+df -h 2>/dev/null | grep -E "local|nvme|scratch|shm"
+
+# Look for shared file system (BeeGFS/Lustre/GPFS)
+df -hT 2>/dev/null | grep -E "beegfs|lustre|gpfs|nfs|panfs"
+# Common shared paths: /rcfs/projects/*, /global/project/*, /lustre/*, /gpfs/*
+
+# TMPFS is usually /dev/shm, verify:
+df -h /dev/shm
+```
+
+### Find software modules
+
+```bash
+# List available ADIOS2 modules
+module avail adios 2>&1 | head -20
+module avail adios2 2>&1 | head -20
+
+# List Python / conda modules
+module avail python 2>&1 | head -20
+module avail conda 2>&1 | head -20
+module avail anaconda 2>&1 | head -20
+```
+
+### Check your existing conda/venv environments
+
+```bash
+conda env list 2>/dev/null
+ls ~/.conda/envs/ 2>/dev/null
+ls ~/miniconda*/envs/ 2>/dev/null
+ls ~/anaconda*/envs/ 2>/dev/null
+```
+
+---
+
+## Step 1: Fill in config.env
+
+```bash
+cd /path/to/wfbench_adios_dpm/
+cp config.env.template config.env
+nano config.env   # or vim / emacs
+```
+
+Replace every `TODO` with values discovered in Step 0. Example filled config:
+
+```bash
+CLUSTER_NAME="deception"
+PARTITION="compute"
+NODES=4
+CORES_PER_NODE=40
+MEM_PER_NODE_GB=384
+
+LOCAL_SSD_PATH="/local/scratch"
+BEEGFS_PATH="/rcfs/projects/YOUR_PROJECT"
+TMPFS_PATH="/dev/shm"
+
+ADIOS2_MODULE="adios2/2.9.1-openmpi4"
+PYTHON_ENV="/path/to/your/.venv"
+
+DPM_PROFILE_DIR=""   # leave empty first time
+```
+
+**Do not commit config.env** — it is in `.gitignore` because it contains cluster-specific paths.
+
+---
+
+## Step 2: Set Up Python Environment
+
+### Option A: Use existing conda env (preferred if ADIOS2 already installed)
+
+```bash
+module load ADIOS2_MODULE_NAME   # from config.env ADIOS2_MODULE
+conda activate YOUR_ENV
+pip install wfcommons>=1.4
+python -c "import adios2; import wfcommons; print('OK')"
+```
+
+### Option B: Create new conda env
+
+```bash
+module load python/3.11          # or anaconda/...
+conda create -n dpm_wfbench python=3.11 -y
+conda activate dpm_wfbench
+pip install wfcommons>=1.4 mpi4py
+
+# Then load ADIOS2 module on top (if available as a system module)
+module load adios2/...
+python -c "import adios2; print(adios2.__version__)"
+```
+
+### Option C: Use system ADIOS2 Python bindings (no module)
+
+```bash
+# If ADIOS2 is installed system-wide:
+find /usr /opt /sw /apps -name "adios2*" -name "*.py" 2>/dev/null | head -10
+
+# Add to PYTHONPATH if found:
+export PYTHONPATH=/path/to/adios2/python/lib:$PYTHONPATH
+```
+
+After setup, set `PYTHON_ENV` in config.env to the path of your activated environment:
+
+```bash
+PYTHON_ENV=$(conda info --base)/envs/dpm_wfbench
+# or
+PYTHON_ENV=$(python -c "import sys; print(sys.prefix)")
+```
+
+---
+
+## Step 3: Generate Workflow JSON Files
+
+```bash
+source config.env          # loads MEM_PER_NODE_GB
+cd wfbench/
+python generate_workflow.py --size small   # ~5% of node RAM
+python generate_workflow.py --size medium  # ~30% of node RAM
+python generate_workflow.py --size large   # ~80% of node RAM (ADIOS SST should fail here)
+ls -lh workflow_*.json     # confirm created
+```
+
+The generator reads `MEM_PER_NODE_GB` from environment to set absolute data sizes.
+If that variable is not set, it defaults to 128 GB.
+
+---
+
+## Step 4: Verify Slurm Setup Before Submitting
+
+Check that you can submit a test job before running the real experiments:
+
+```bash
+# Simple test job — prints node info
+sbatch --partition=PARTITION --nodes=1 --ntasks=1 --time=00:05:00 \
+  --account=ACCOUNT_NAME \
+  --wrap="hostname; nproc; free -h; df -h /dev/shm"
+
+# Watch it:
+squeue --me
+```
+
+If `--account` is required (most PNNL clusters require this), add it to the Slurm
+header in `scripts/run_adios_sst.sh` and `scripts/run_storage.sh`:
+
+```bash
+# Find the line:
+# TODO: add --account, --reservation, or other cluster-specific flags
+# Replace with:
+#SBATCH --account=YOUR_ACCOUNT
+```
+
+---
+
+## Step 5: Run the Experiments
+
+### Recommended order (start small, verify, scale up)
+
+```bash
+# Test 1: Small data with ADIOS SST (should succeed)
+bash scripts/run_adios_sst.sh --size small --nodes 4
+
+# Test 2: Small data with file-based storage (should succeed)
+bash scripts/run_storage.sh --size small --storage tmpfs --nodes 4
+bash scripts/run_storage.sh --size small --storage ssd   --nodes 4
+
+# Monitor jobs:
+squeue --me
+tail -f results/*/slurm_*.out
+
+# Once small works, run medium and large:
+bash scripts/run_adios_sst.sh --size medium --nodes 4
+bash scripts/run_adios_sst.sh --size large  --nodes 4   # expected to fail
+
+bash scripts/run_storage.sh --size large --storage ssd    --nodes 4
+bash scripts/run_storage.sh --size large --storage beegfs --nodes 4
+```
+
+### Check results as they finish
+
+```bash
+# Each completed run writes: results/{run_id}/result.txt
+cat results/*/result.txt
+
+# Collect all into a single CSV:
+bash scripts/collect_results.sh
+
+# Generate comparison table and plot:
+python analysis/compare_results.py \
+  --results results/all_results.csv \
+  --output  results/
+```
+
+---
+
+## Step 6: Troubleshooting
+
+### Job never starts (PENDING forever)
+
+```bash
+squeue --me -o "%T %R %j"   # shows reason
+# Common reasons: QOSMaxCpuPerUserLimit, AssocGrpCpuLimit, partition unavailable
+# Fix: check available partitions with sinfo; check account limits with sacctmgr
+```
+
+### ADIOS2 not found at runtime
+
+```bash
+# In slurm output, you'll see: ModuleNotFoundError: No module named 'adios2'
+# Fix: add module load line to job script, or activate conda env before job
+# Edit run_adios_sst.sh:
+#   source ${PYTHON_ENV}/bin/activate  <-- already there
+# Verify PYTHON_ENV path is correct in config.env
+```
+
+### Local SSD path does not exist on compute nodes
+
+```bash
+# The LOCAL_SSD_PATH must be accessible from compute nodes (not just login node)
+# Test from a job:
+sbatch --partition=PARTITION --nodes=1 --wrap="ls -la /local/scratch || echo MISSING"
+```
+
+### ADIOS SST connection timeout
+
+```bash
+# This is expected behavior for large data or time-decoupled execution.
+# The consumer_task.py catches adios2.error.exception and records status=OOM_OR_TIMEOUT
+# Check: results/{run_id}/consumer_*.log
+```
+
+### Out of memory (OOM) on compute node
+
+```bash
+# dmesg or slurm output will show: Killed process ... Out of memory
+# consumer_task.py catches MemoryError and records status=OOM
+# This is the expected ADIOS SST failure mode for large data
+```
+
+---
+
+## Slurm Account and Partition Quick Reference
+
+Once you discover your cluster's values (Step 0), record them here for reference:
+
+| Variable        | Value (fill in) |
+|-----------------|-----------------|
+| Cluster name    | TODO            |
+| Partition       | TODO            |
+| Account         | TODO            |
+| Nodes available | TODO            |
+| Cores per node  | TODO            |
+| RAM per node    | TODO GB         |
+| Local SSD path  | TODO            |
+| Shared FS path  | TODO            |
+| ADIOS2 module   | TODO            |
+| Conda env path  | TODO            |
+
+---
+
+## What Success Looks Like
+
+After all experiments complete, `results/all_results.csv` should show:
+
+| size   | backend   | total_time_s | status  |
+|--------|-----------|-------------|---------|
+| small  | adios_sst | ~Xs         | SUCCESS |
+| small  | ssd       | ~Xs         | SUCCESS |
+| medium | adios_sst | ~Xs         | SUCCESS |
+| medium | ssd       | ~Xs         | SUCCESS |
+| large  | adios_sst | —           | FAILED  |  ← expected
+| large  | ssd       | ~Xs         | SUCCESS |
+| large  | beegfs    | ~Xs         | SUCCESS |
+
+The FAILED row for `large/adios_sst` is the key result: DPM's storage selection
+avoids this failure, while ADIOS SST cannot handle time-decoupled large-data workflows.
