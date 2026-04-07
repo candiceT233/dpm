@@ -21,60 +21,77 @@ sacctmgr show user $(whoami) withassoc format=user,account,partition -p 2>/dev/n
   echo "Try: squeue --me or check with cluster admin"
 ```
 
-### Find partitions and node names
+### Find partition and dc-class node names
+
+The target partition is `slurm` and the compute nodes follow the naming pattern `dcXXX`
+(e.g., `dc001`, `dc128`). Confirm this and pick one node for the probe job:
 
 ```bash
-# List available partitions and node counts
-sinfo -o "%P %a %l %D %C" 2>/dev/null | head -30
+# Confirm dc nodes are in the slurm partition
+sinfo -p slurm -o "%N %m %c %G" | head -20
 
-# List actual node names in each partition (you need a specific node name for the probe job below)
-sinfo -p PARTITION_NAME -o "%N %m %c %G" | head -20
+# Expand node list to individual names (shows dcXXX pattern)
+sinfo -p slurm -o "%N" | head -5
+scontrol show hostnames $(sinfo -p slurm -o "%N" --noheader | head -1)
 
-# Get node names only (pick one to use in the probe job)
-sinfo -p PARTITION_NAME -o "%N" | head -10
+# Pick the first available idle dc node for the probe:
+sinfo -p slurm -t idle -o "%n" | grep "^dc" | head -1
 ```
 
 > **WARNING**: `scontrol show node` on the head/login node reports login node specs,
 > not compute node specs. RAM, CPU count, and storage mounts on compute nodes may differ.
-> Always use the probe job below to get accurate compute node specs.
+> Always use the probe job below to get accurate compute node specs before setting config.env.
+> All `dcXXX` nodes are assumed to be homogeneous — one probe is sufficient.
 
-### Probe a compute node for actual specs (required)
+### Probe a single dc node for actual specs (required before filling config.env)
 
-Submit a short job to get real compute node hardware info. Replace `PARTITION_NAME`,
-`ACCOUNT_NAME`, and optionally `NODE_NAME` (from `sinfo` above) with actual values:
+Fill in `ACCOUNT_NAME` (from `sacctmgr` / `groups` above) and one dc node name, then submit:
 
 ```bash
-sbatch --partition=PARTITION_NAME \
-       --account=ACCOUNT_NAME \
+# Pick a node name from the sinfo output above, e.g. dc001
+DC_NODE="dc001"   # replace with actual node name
+ACCOUNT="YOUR_ACCOUNT"   # replace with your account
+
+sbatch --partition=slurm \
+       --account=${ACCOUNT} \
        --nodes=1 --ntasks=1 --time=00:05:00 \
-       --nodelist=NODE_NAME \
+       --nodelist=${DC_NODE} \
        --output=/tmp/node_probe_%j.out \
        --wrap="
-echo '=== Node: ' \$(hostname)
+echo '=== Node: '\$(hostname)
 echo '=== CPUs:' \$(nproc)
 echo '=== RAM:'
 free -h
 echo '=== Storage mounts:'
 df -hT | grep -v tmpfs | grep -v overlay
 echo '=== Local scratch (check common paths):'
-ls /local/ /local/scratch/ /nvme/ /scratch/ 2>/dev/null || echo 'none found'
+ls /local/ /local/scratch/ /nvme/ /scratch/ 2>/dev/null || echo 'none of these paths found'
 echo '=== TMPFS (/dev/shm):'
 df -h /dev/shm
-echo '=== Loaded modules:'
-module list 2>&1
+echo '=== Modules available (adios, python, conda):'
+module avail adios2 2>&1 | head -10
+module avail python 2>&1 | head -5
+module avail conda 2>&1 | head -5
+echo '=== Existing conda envs:'
+conda env list 2>/dev/null || echo 'conda not found'
 "
 
-# Wait for it to finish (usually under 1 minute), then read output:
-# squeue --me   # watch until job disappears
-# cat /tmp/node_probe_JOBID.out
+# Monitor until complete (usually < 1 minute):
+squeue --me
+
+# Then read the output (replace JOBID):
+cat /tmp/node_probe_JOBID.out
 ```
 
 Record from the output:
-- **RAM**: the `Mem:` total line from `free -h` → set as `MEM_PER_NODE_GB`
-- **CPUs**: `nproc` output → set as `CORES_PER_NODE`
-- **Node name**: `hostname` output → needed for `--nodelist` in experiment jobs
-- **Local SSD path**: whichever of `/local/scratch`, `/nvme`, etc. exists and has space
-- **Shared FS path**: from `df -hT` output (beegfs/lustre/gpfs line)
+- **RAM**: `Mem:` total from `free -h` → `MEM_PER_NODE_GB` in config.env
+- **CPUs**: `nproc` → `CORES_PER_NODE`
+- **Local SSD path**: whichever of `/local/scratch`, `/nvme`, etc. exists with space → `LOCAL_SSD_PATH`
+- **Shared FS**: BeeGFS/Lustre line from `df -hT` → `BEEGFS_PATH`
+- **ADIOS2 module name**: from module avail output → `ADIOS2_MODULE`
+- **Conda env / Python prefix**: → `PYTHON_ENV`
+
+All other `dcXXX` nodes are assumed to have identical hardware — no need to probe more.
 
 ### Find storage paths (head node only — verify on compute node via probe job above)
 
@@ -230,26 +247,62 @@ header in `scripts/run_adios_sst.sh` and `scripts/run_storage.sh`:
 
 ## Step 5: Run the Experiments
 
-### Recommended order (start small, verify, scale up)
+The experiments use the `slurm` partition with `dcXXX` nodes, scaling from 4 up to 32 nodes.
+Start small to verify the setup, then scale.
+
+### Phase 1: Single-size verification (4 nodes)
 
 ```bash
-# Test 1: Small data with ADIOS SST (should succeed)
+# Verify environment works end-to-end before scaling
 bash scripts/run_adios_sst.sh --size small --nodes 4
+bash scripts/run_storage.sh   --size small --storage ssd   --nodes 4
+bash scripts/run_storage.sh   --size small --storage tmpfs --nodes 4
 
-# Test 2: Small data with file-based storage (should succeed)
-bash scripts/run_storage.sh --size small --storage tmpfs --nodes 4
-bash scripts/run_storage.sh --size small --storage ssd   --nodes 4
-
-# Monitor jobs:
+# Monitor:
 squeue --me
 tail -f results/*/slurm_*.out
+```
 
-# Once small works, run medium and large:
+### Phase 2: Data-size sweep (4 nodes, all sizes)
+
+Once Phase 1 succeeds, run the full size sweep at 4 nodes:
+
+```bash
+# Medium data
 bash scripts/run_adios_sst.sh --size medium --nodes 4
-bash scripts/run_adios_sst.sh --size large  --nodes 4   # expected to fail
+bash scripts/run_storage.sh   --size medium --storage ssd    --nodes 4
+bash scripts/run_storage.sh   --size medium --storage beegfs --nodes 4
 
-bash scripts/run_storage.sh --size large --storage ssd    --nodes 4
-bash scripts/run_storage.sh --size large --storage beegfs --nodes 4
+# Large data — ADIOS SST expected to fail here
+bash scripts/run_adios_sst.sh --size large  --nodes 4   # expected: FAIL
+bash scripts/run_storage.sh   --size large  --storage ssd    --nodes 4
+bash scripts/run_storage.sh   --size large  --storage beegfs --nodes 4
+```
+
+### Phase 3: Node-count scaling (large data, DPM storage only)
+
+Scale the successful storage configurations across node counts to show DPM works at scale.
+ADIOS SST is not run here (it already failed at 4 nodes).
+
+```bash
+for N in 8 16 32; do
+    bash scripts/run_storage.sh --size large --storage ssd    --nodes ${N}
+    bash scripts/run_storage.sh --size large --storage beegfs --nodes ${N}
+done
+```
+
+> Note: Requesting 32 nodes on `slurm` partition may require queuing time. Submit all
+> jobs and let them run. Use `squeue --me` to monitor. Each job writes its own
+> `results/{run_id}/result.txt` independently.
+
+### Collect and analyze results
+
+```bash
+bash scripts/collect_results.sh
+
+python analysis/compare_results.py \
+  --results results/all_results.csv \
+  --output  results/
 ```
 
 ### Check results as they finish
@@ -319,21 +372,22 @@ sbatch --partition=PARTITION --nodes=1 --wrap="ls -la /local/scratch || echo MIS
 
 Once you discover your cluster's values (Step 0), record them here for reference:
 
-| Variable              | Value (fill in) | Source                        |
-|-----------------------|-----------------|-------------------------------|
-| Cluster name          | TODO            | hostname on login node        |
-| Partition             | TODO            | sinfo                         |
-| Account               | TODO            | sacctmgr / groups             |
-| Example node name     | TODO            | sinfo -o "%N" (for probe job) |
-| Nodes available       | TODO            | sinfo                         |
-| Cores per node        | TODO            | probe job: nproc              |
-| RAM per node          | TODO GB         | probe job: free -h            |
-| Local SSD path        | TODO            | probe job: ls /local /nvme    |
-| Local SSD capacity    | TODO GB         | probe job: df -h              |
-| Shared FS path        | TODO            | df -hT on login node          |
-| TMPFS size (/dev/shm) | TODO GB         | probe job: df -h /dev/shm     |
-| ADIOS2 module         | TODO            | module avail adios2           |
-| Conda env path        | TODO            | conda env list                |
+| Variable              | Value (fill in) | Source                              |
+|-----------------------|-----------------|-------------------------------------|
+| Cluster name          | TODO            | hostname on login node              |
+| Partition             | slurm           | known — dc nodes are in this partition |
+| Account               | TODO            | sacctmgr / groups                   |
+| Node name pattern     | dcXXX           | known — e.g. dc001, dc128           |
+| Probe node used       | TODO            | first idle dc node from sinfo       |
+| Cores per node        | TODO            | probe job: nproc                    |
+| RAM per node          | TODO GB         | probe job: free -h                  |
+| Local SSD path        | TODO            | probe job: ls /local /nvme          |
+| Local SSD capacity    | TODO GB         | probe job: df -h                    |
+| Shared FS path        | TODO            | df -hT on login or compute node     |
+| TMPFS size (/dev/shm) | TODO GB         | probe job: df -h /dev/shm           |
+| ADIOS2 module         | TODO            | probe job: module avail adios2      |
+| Conda env path        | TODO            | probe job: conda env list           |
+| Max nodes for expts   | up to 32        | scale from 4 → 8 → 16 → 32         |
 
 ---
 
