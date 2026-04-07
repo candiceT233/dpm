@@ -33,9 +33,13 @@ echo "=== ADIOS SST run: size=${SIZE}, nodes=${NODES} ==="
 echo "    Results: ${RESULTS_DIR}"
 
 # ── Extract data size from workflow JSON ──────────────────────────────────────
-WORKFLOW_JSON="${ROOT_DIR}/wfbench/workflow_${SIZE}.json"
+WORKFLOW_JSON="${ROOT_DIR}/wfbench/workflow_${SIZE}_${NODES}n.json"
+# Fallback to non-node-count JSON if per-node-count JSON not generated yet
 if [[ ! -f "${WORKFLOW_JSON}" ]]; then
-    echo "ERROR: ${WORKFLOW_JSON} not found. Run: python wfbench/generate_workflow.py --size ${SIZE}"
+    WORKFLOW_JSON="${ROOT_DIR}/wfbench/workflow_${SIZE}.json"
+fi
+if [[ ! -f "${WORKFLOW_JSON}" ]]; then
+    echo "ERROR: workflow JSON not found. Run: python wfbench/generate_workflow.py --size ${SIZE} --nodes ${NODES}"
     exit 1
 fi
 
@@ -67,14 +71,23 @@ cat > "${JOB_SCRIPT}" << SLURM_EOF
 #SBATCH --error=${RESULTS_DIR}/slurm_%j.err
 
 source ${ROOT_DIR}/config.env
-source ${PYTHON_ENV}/bin/activate 2>/dev/null || true
+eval "\$(conda shell.bash hook)" 2>/dev/null || true
+conda activate ${PYTHON_ENV} 2>/dev/null || source ${PYTHON_ENV}/bin/activate 2>/dev/null || true
 module load ${ADIOS2_MODULE} 2>/dev/null || true
 
 export ADIOS2_CONFIG_FILE="${ROOT_DIR}/adios/adios2.xml"
 
 # Rendezvous directory (must be on shared filesystem, visible to all nodes)
-RENDEZVOUS_DIR="${BEEGFS_PATH}/adios_rendezvous_${SLURM_JOB_ID}"
+RENDEZVOUS_DIR="${BEEGFS_PATH}/adios_rendezvous_\${SLURM_JOB_ID}"
 mkdir -p "\${RENDEZVOUS_DIR}"
+
+# Cleanup on exit, timeout, or kill — removes rendezvous dir AND consumer .bp outputs
+cleanup() {
+    echo "[cleanup] removing \${RENDEZVOUS_DIR} and analysis_out_*.bp"
+    rm -rf "\${RENDEZVOUS_DIR}"
+    rm -f "${BEEGFS_PATH}"/analysis_out_*.bp
+}
+trap cleanup EXIT ERR INT TERM
 
 echo "=== Stage 1: Producers (ADIOS SST write) ==="
 T_STAGE1_START=\$(date +%s)
@@ -83,7 +96,7 @@ T_STAGE1_START=\$(date +%s)
 # Each producer writes STAGE1_GB GB via SST
 PRODUCER_PIDS=()
 for i in \$(seq 0 $((N_TASKS-1))); do
-    mpirun --bind-to none -np 1 python3 ${ROOT_DIR}/adios/producer_task.py \
+    python3 ${ROOT_DIR}/adios/producer_task.py \
         --output-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \
         --data-size-gb ${STAGE1_GB} \
         --transfer-size-mb 1 \
@@ -97,7 +110,7 @@ T_STAGE2_START=\$(date +%s)
 # Launch N_TASKS consumers — must run SIMULTANEOUSLY with producers
 CONSUMER_PIDS=()
 for i in \$(seq 0 $((N_TASKS-1))); do
-    mpirun --bind-to none -np 1 python3 ${ROOT_DIR}/adios/consumer_task.py \
+    python3 ${ROOT_DIR}/adios/consumer_task.py \
         --input-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \
         --output-path "\${BEEGFS_PATH}/analysis_out_\${i}.bp" \
         > "${RESULTS_DIR}/consumer_\${i}.log" 2>&1 &
@@ -132,8 +145,7 @@ echo "status=\$([ \${FAILED} -eq 0 ] && echo SUCCESS || echo FAILED)"
 
 cat "${RESULTS_DIR}/result.txt"
 
-# Cleanup rendezvous files
-rm -rf "\${RENDEZVOUS_DIR}"
+# Cleanup handled by trap — no explicit rm needed here
 SLURM_EOF
 
 echo "Submitting: sbatch ${JOB_SCRIPT}"
