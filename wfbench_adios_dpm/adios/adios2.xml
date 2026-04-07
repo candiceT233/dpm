@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!--
+  ADIOS2 configuration for the WfBench ADIOS vs DPM experiment.
+
+  Two engines are configured:
+    1. SST  — in-memory streaming (the baseline being compared against DPM)
+    2. BP5  — file-based I/O     (ADIOS using storage, for optional comparison)
+
+  Usage:
+    Set ADIOS2_CONFIG_FILE=adios2.xml in your environment before running
+    producer_task.py or consumer_task.py.
+
+  SST known limitations (see design/failure_analysis.md):
+    - Requires producer and consumer to run simultaneously
+    - Data must fit in memory buffers (RendezvousReaderCount * buffer)
+    - Fails with OOM or timeout for large data configurations
+-->
+
+<adios-config>
+
+  <!-- ═══════════════════════════════════════════════════════
+       Engine 1: SST (Sustainable Staging Transport)
+       In-memory coupling — the ADIOS in-situ streaming baseline
+       ═══════════════════════════════════════════════════════ -->
+  <io name="SST_writer">
+    <engine type="SST">
+      <!-- Network transport: WAN or RDMA -->
+      <!-- TODO: set to "RDMA" if InfiniBand is available on the cluster, else "WAN" -->
+      <parameter key="DataTransport" value="WAN"/>
+
+      <!-- Buffer size per writer step (bytes). If data > this, SST blocks or OOMs. -->
+      <!-- TODO: set to ~50% of per-node free memory after application footprint -->
+      <!-- Example: 180GB node, ~100GB for SST: 107374182400 -->
+      <parameter key="MaxStreamsBeforeRemoval" value="0"/>
+
+      <!-- Rendezvous: writer waits for this many readers before proceeding -->
+      <parameter key="RendezvousReaderCount" value="1"/>
+
+      <!-- Timeout (seconds) for reader to connect. Fail fast for large configs. -->
+      <parameter key="OpenTimeoutSecs" value="60"/>
+    </engine>
+  </io>
+
+  <io name="SST_reader">
+    <engine type="SST">
+      <parameter key="DataTransport" value="WAN"/>
+      <parameter key="OpenTimeoutSecs" value="60"/>
+    </engine>
+  </io>
+
+  <!-- ═══════════════════════════════════════════════════════
+       Engine 2: BP5 (file-based)
+       Writes to storage — use this to test ADIOS in file mode
+       (not the main comparison, but useful for sanity check)
+       ═══════════════════════════════════════════════════════ -->
+  <io name="BP5_writer">
+    <engine type="BP5">
+      <!-- TODO: adjust BufferChunkSize and NumAggregators for cluster -->
+      <parameter key="BufferChunkSize"  value="134217728"/>  <!-- 128MB chunks -->
+      <parameter key="NumAggregators"   value="1"/>
+      <parameter key="StatsLevel"       value="0"/>
+    </engine>
+  </io>
+
+  <io name="BP5_reader">
+    <engine type="BP5">
+      <parameter key="StatsLevel" value="0"/>
+    </engine>
+  </io>
+
+</adios-config>

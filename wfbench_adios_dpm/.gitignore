@@ -1,0 +1,22 @@
+# Cluster-specific config (has local paths)
+config.env
+
+# Generated workflow files (regenerate with generate_workflow.py)
+wfbench/workflow_*.json
+
+# Experiment results (large, cluster-generated)
+results/*/
+results/*.csv
+results/*.pdf
+results/*.png
+
+# Python artifacts
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# ADIOS output files
+*.bp
+*.bp.dir/
+*.sst
