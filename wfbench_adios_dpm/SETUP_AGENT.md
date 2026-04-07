@@ -49,14 +49,17 @@ Fill in `ACCOUNT_NAME` (from `sacctmgr` / `groups` above) and one dc node name, 
 
 ```bash
 # Pick a node name from the sinfo output above, e.g. dc001
-DC_NODE="dc001"   # replace with actual node name
-ACCOUNT="YOUR_ACCOUNT"   # replace with your account
+DC_NODE="dc001"      # replace with actual node name
+ACCOUNT="YOUR_ACCOUNT"  # replace with your account
+PROBE_OUT="/tmp/node_probe_$$.out"
+PROBE_ERR="/tmp/node_probe_$$.err"
 
 sbatch --partition=slurm \
        --account=${ACCOUNT} \
        --nodes=1 --ntasks=1 --time=00:05:00 \
        --nodelist=${DC_NODE} \
-       --output=/tmp/node_probe_%j.out \
+       --output=${PROBE_OUT} \
+       --error=${PROBE_ERR} \
        --wrap="
 echo '=== Node: '\$(hostname)
 echo '=== CPUs:' \$(nproc)
@@ -74,16 +77,51 @@ module avail python 2>&1 | head -5
 module avail conda 2>&1 | head -5
 echo '=== Existing conda envs:'
 conda env list 2>/dev/null || echo 'conda not found'
+echo '=== PROBE COMPLETE ==='
 "
-
-# Monitor until complete (usually < 1 minute):
-squeue --me
-
-# Then read the output (replace JOBID):
-cat /tmp/node_probe_JOBID.out
 ```
 
-Record from the output:
+Wait for the job to finish:
+
+```bash
+# Check status — wait until your job no longer appears
+squeue --me
+
+# Once gone, get the job ID from the sbatch output line above, then:
+cat ${PROBE_OUT}   # stdout — hardware info
+cat ${PROBE_ERR}   # stderr — check for errors
+```
+
+### Check probe output for errors (do this before proceeding)
+
+After the job finishes, check both stdout and stderr carefully:
+
+**In stdout (`PROBE_OUT`), verify:**
+- Last line reads `=== PROBE COMPLETE ===` — if missing, the job was killed or hit a timeout
+- `free -h` shows a `Mem:` line with a total — if missing, the job may have failed to start on the node
+- At least one storage path is listed under local scratch — if all say "none found", `LOCAL_SSD_PATH` must be left empty and that storage tier skipped in experiments
+- `module avail adios2` returns at least one result — if empty, ADIOS2 is not a module and must be installed manually (see Step 2 Option C)
+
+**In stderr (`PROBE_ERR`), look for:**
+```bash
+# Common errors and what they mean:
+grep -i "error\|denied\|invalid\|unknown\|not found\|failed" ${PROBE_ERR}
+```
+
+| Error pattern | Likely cause | Fix |
+|---|---|---|
+| `Invalid account` | Account name wrong | Re-run `sacctmgr show user $(whoami) withassoc format=account -p` |
+| `Invalid partition` | `slurm` partition name wrong on this cluster | Run `sinfo` to find correct name |
+| `Invalid node name` | DC_NODE doesn't exist or is wrong partition | Run `sinfo -p slurm -o "%N"` to get valid names |
+| `Requested node is down/drained` | That specific node unavailable | Pick a different idle dc node from `sinfo -p slurm -t idle -o "%n"` |
+| `Requested time limit exceeds` | 5-minute limit too long for partition | Try `--time=00:02:00` |
+| `(empty stderr, job never ran)` | Job stuck PENDING | Run `squeue --me -o "%T %R"` to see reason |
+
+**If the probe succeeded with no errors**, record the values and proceed to Step 1.
+
+**If the probe had errors**, fix the sbatch flags based on the table above and resubmit before continuing. Do not fill in `config.env` until the probe completes cleanly.
+
+Record from a clean probe output:
 - **RAM**: `Mem:` total from `free -h` → `MEM_PER_NODE_GB` in config.env
 - **CPUs**: `nproc` → `CORES_PER_NODE`
 - **Local SSD path**: whichever of `/local/scratch`, `/nvme`, etc. exists with space → `LOCAL_SSD_PATH`
