@@ -75,16 +75,53 @@ ADIOS SST (Sustainable Staging Transport) requires:
 - Node has 384GB total RAM (shared with OS, MPI buffers, etc.)
 - OOM kill or SST stall
 
-## Comparison with DPM
+## How DPM Is Evaluated
 
-DPM profiles each storage tier (local SSD, tmpfs, BeeGFS) with the exact I/O patterns
-above (sw 1MB, rr 4KB-64KB, sr 1MB) and predicts:
+DPM does not run live during these experiments. Instead, DPM scores are computed
+**offline** from IOR profiling data already collected on the target cluster, then
+compared against the actual measured workflow times.
 
-| Config | DPM recommendation | Reasoning |
-|--------|-------------------|-----------|
-| small  | tmpfs (node-local) | Data fits in memory, fastest path |
-| medium | local SSD          | Too large for tmpfs, SSD avoids network |
-| large  | BeeGFS or SSD      | Depends on per-node SSD capacity; BeeGFS if data exceeds SSD |
+### DPM Score Definition
 
-DPM succeeds in all three cases because file-based storage does not require
-simultaneous producer-consumer execution or in-memory buffering.
+For each producer-consumer pair and each storage tier, DPM computes:
+
+```
+DPM_score = estT_prod + estT_cons
+```
+
+Where `estT_prod` and `estT_cons` are the estimated I/O times for the producer
+(write) and consumer (read) operations, predicted by the linear regression model
+trained on IOR profiling data. **Lower DPM score = better predicted performance.**
+
+### Evaluation Logic
+
+1. Run all storage tiers (tmpfs, ssd, beegfs) on all data sizes → record `total_time_s`
+2. Compute DPM score for each (tier, data size, I/O pattern) using profiling data
+3. Rank tiers by DPM score (ascending) and by actual time (ascending)
+4. **Key claim**: DPM rank matches actual rank — the tier DPM scores lowest is the
+   tier that actually ran fastest
+
+### Target Result Table
+
+| Size   | Tier   | DPM Score | DPM Rank | Actual Time | Actual Rank | Match? |
+|--------|--------|-----------|----------|-------------|-------------|--------|
+| small  | tmpfs  | lowest    | 1        | fastest     | 1           | YES    |
+| small  | ssd    | mid       | 2        | mid         | 2           | YES    |
+| small  | beegfs | highest   | 3        | slowest     | 3           | YES    |
+| medium | ssd    | lowest    | 1        | fastest     | 1           | YES    |
+| medium | beegfs | mid       | 2        | mid         | 2           | YES    |
+| medium | tmpfs  | highest   | 3        | slowest/OOM | 3           | YES    |
+| large  | ssd    | lowest    | 1        | fastest     | 1           | YES    |
+| large  | beegfs | mid       | 2        | mid         | 2           | YES    |
+| large  | tmpfs  | —         | N/A      | OOM/FAIL    | N/A         | —      |
+
+And separately, ADIOS SST fails on large data — showing DPM's file-based storage
+selection is necessary even before ranking matters.
+
+### What This Demonstrates
+
+- DPM correctly identifies the best storage tier without exhaustive trial
+- The "trick": by showing DPM score rank = actual time rank across all configurations,
+  we validate that DPM's prediction model generalizes to this new synthetic workload
+- ADIOS SST failure establishes the motivation: in-situ streaming is not always viable,
+  and DPM's storage selection fills that gap
