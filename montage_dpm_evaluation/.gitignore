@@ -1,0 +1,17 @@
+# Cluster-specific config
+config.env
+
+# Downloaded data (re-downloadable)
+data/*
+!data/.gitkeep
+
+# Experiment results (reproducible)
+results/*
+!results/.gitkeep
+
+# Python environment
+.venv/
+__pycache__/
+
+# Darshan logs
+darshan_logs/
