@@ -1,0 +1,20 @@
+RESULT: size=large, backend=ssd, nodes=4
+mImgtbl_time_s=33
+mProjExec_time_s=277
+mImgtbl_proj_time_s=4
+mOverlaps_time_s=3
+mDiffExec_time_s=24
+mFitExec_time_s=21
+mBgModel_time_s=6
+mBgExec_time_s=9
+mImgtbl_corr_time_s=5
+mAdd_time_s=21
+total_time_s=403
+n_images=1425
+n_pairs=5726
+proj_bytes=2811850240
+diff_bytes=1403942528
+corr_bytes=2811850240
+mosaic_bytes=931743360
+total_intermediate_bytes=7959386368
+status=SUCCESS

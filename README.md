@@ -137,3 +137,7 @@ For questions, issues, or contributions, please:
 ---
 
 **Note**: This system is designed for analyzing scientific workflow performance and optimizing storage configurations. For production use, ensure all dependencies are properly installed and test with your specific workflow data.
+
+
+Resume this session with:────────────────────────────────────────────────────────────────────────────────────────────────────────
+claude --resume 35b9b70c-9e40-4389-9283-103b7e6df8f0

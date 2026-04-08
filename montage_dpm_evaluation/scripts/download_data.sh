@@ -42,7 +42,7 @@ echo "Region: ${REGION_DEG} degrees"
 echo "Output: ${DATA_DIR}"
 
 # Use Montage's Python mArchiveDownload
-MONTAGE_PY="${ROOT_DIR}/../../../hpc_workflows/repos/Montage/python/MontagePy"
+MONTAGE_PY="${MONTAGE_PY:-/people/tang584/install/Montage/python/MontagePy}"
 if [[ ! -f "${MONTAGE_PY}/mArchiveDownload.py" ]]; then
     echo "ERROR: MontagePy not found at ${MONTAGE_PY}"
     echo "Set MONTAGE_PY to the path containing mArchiveDownload.py"

@@ -3,12 +3,12 @@
 #
 # DPM analysis recommends:
 #   Stage 1 (sequential write 1MB): BeeGFS  — high bandwidth, shared across nodes
-#   Stage 2 (random read 4KB + sequential write 1MB): SSD — low latency random I/O
+#   Stage 2 (sequential read 1MB + sequential write 1MB): SSD — fast local I/O
 #   Stage 3 (sequential read aggregation): SSD — data already local from Stage 2
 #
 # This represents what DPM would select based on I/O pattern profiling:
-#   - BeeGFS excels at large sequential I/O but is terrible for small random reads
-#   - Node-local NVMe SSD handles both patterns well, especially random 4KB reads
+#   - BeeGFS excels at large sequential I/O across nodes
+#   - Node-local NVMe SSD provides fast sequential I/O with no network overhead
 #
 # A staging step copies Stage 1 output from BeeGFS → SSD between stages,
 # simulating DPM's data placement decision.
@@ -175,10 +175,10 @@ STAGING_TIME=\$((T_STAGING_END - T_STAGING_START))
 echo "Staging time: \${STAGING_TIME}s (copied ${N_TASKS} files BeeGFS → SSD)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2: N parallel analysis tasks — random read 4KB + seq write 1MB → SSD
-# DPM rationale: SSD has low-latency random I/O, unlike BeeGFS
+# Stage 2: N parallel analysis tasks — seq read 1MB + seq write 1MB → SSD
+# DPM rationale: SSD has low-latency I/O, data staged from BeeGFS
 # ─────────────────────────────────────────────────────────────────────────────
-echo "=== Stage 2: Analysis tasks (random read 4KB + seq write → SSD) ==="
+echo "=== Stage 2: Analysis tasks (seq read 1MB + seq write 1MB → SSD) ==="
 T_STAGE2_START=\$(date +%s)
 
 PIDS=()
@@ -188,34 +188,34 @@ for i in \$(seq 0 $((N_TASKS-1))); do
     STAGE2_MB=\$(python3 -c "print(int(${STAGE2_BYTES} / 1024**2))")
     (
     if [[ \${USE_IOR} -eq 1 ]]; then
-        ior -a POSIX -r -z -t 4k -b \${STAGE2_MB}m -o "\${IN_FILE}" -F -k 2>&1
+        ior -a POSIX -r -t 1m -b \${STAGE2_MB}m -o "\${IN_FILE}" -F -k 2>&1
         ior -a POSIX -w -t 1m -b \${STAGE2_MB}m -o "\${OUT_FILE}" -F -k 2>&1
     else
         export PY_IN_FILE="\${IN_FILE}" PY_OUT_FILE="\${OUT_FILE}" PY_IN_SIZE=${STAGE1_BYTES} PY_OUT_SIZE=${STAGE2_BYTES} PY_TASK="\${i}"
         python3 - <<'PYEOF'
-import sys, os, random
+import sys, os
 in_f = os.environ["PY_IN_FILE"]
 out_f = os.environ["PY_OUT_FILE"]
 in_size = int(os.environ["PY_IN_SIZE"])
 out_size = int(os.environ["PY_OUT_SIZE"])
 task = os.environ["PY_TASK"]
-chunk_r = 4096
-chunk_w = 1024 * 1024
-n_reads = in_size // chunk_r
-buf_w = b'\x00' * chunk_w
+chunk = 1024 * 1024     # 1MB sequential read/write
+buf_w = b'\x00' * chunk
+read_total = 0
 written = 0
 with open(in_f, 'rb') as fin, open(out_f, 'wb') as fout:
-    for _ in range(n_reads):
-        offset = random.randint(0, max(0, in_size - chunk_r))
-        fin.seek(offset)
-        fin.read(chunk_r)
+    while read_total < in_size:
+        data = fin.read(min(chunk, in_size - read_total))
+        if not data:
+            break
+        read_total += len(data)
     while written < out_size:
-        n = min(chunk_w, out_size - written)
+        n = min(chunk, out_size - written)
         fout.write(buf_w[:n])
         written += n
     fout.flush()
     os.fsync(fout.fileno())
-print(f"[analysis_{task}] random-read {n_reads} x 4KB, wrote {written/(1024**2):.1f} MB")
+print(f"[analysis_{task}] seq-read {read_total/(1024**2):.1f} MB, wrote {written/(1024**2):.1f} MB")
 PYEOF
     fi
     ) > "${RESULTS_DIR}/stage2_\${i}.log" 2>&1 &

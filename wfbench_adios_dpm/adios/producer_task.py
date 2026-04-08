@@ -6,7 +6,7 @@ This simulates Stage 1 (sim) of the synthetic workflow, writing
 output data via ADIOS2's SST engine (in-memory streaming).
 
 Usage:
-    mpirun -np <TASKS_PER_NODE> python producer_task.py \
+    python producer_task.py \
         --output-name sim_out_0 \
         --data-size-gb <STAGE1_FILE_SIZE_GB> \
         --transfer-size-mb 1 \
@@ -14,7 +14,6 @@ Usage:
 
 Environment variables:
     ADIOS2_CONFIG_FILE — path to adios2.xml (overrides --adios-config)
-    OUTPUT_DIR         — directory to write rendezvous .sst files
 """
 
 import adios2
@@ -29,36 +28,38 @@ def run_producer(output_name: str, data_size_bytes: int, transfer_size_bytes: in
     print(f"[producer] output={output_name}, data={data_size_bytes/(1024**3):.2f} GB, "
           f"transfer_size={transfer_size_bytes/(1024**2):.1f} MB")
 
-    adios = adios2.ADIOS(adios_config)
-    io = adios.DeclareIO("SST_writer")
+    adios_obj = adios2.Adios(adios_config)
+    io = adios_obj.declare_io("SST_writer")
 
     # Allocate one transfer-size buffer
     buf = np.zeros(transfer_size_bytes // 8, dtype=np.float64)
     n_steps = data_size_bytes // transfer_size_bytes
 
-    var = io.DefineVariable(
+    # Define variable with per-step shape (not global) so consumer reads 1 step at a time
+    var = io.define_variable(
         "data",
         buf,
-        [n_steps * buf.shape[0]],
+        list(buf.shape),
         [0],
-        buf.shape
+        list(buf.shape)
     )
 
     t0 = time.time()
     try:
-        with io.Open(output_name, adios2.Mode.Write) as writer:
-            for step in range(n_steps):
-                buf[:] = step  # simulate computation result
-                writer.BeginStep()
-                writer.Put(var, buf)
-                writer.EndStep()
+        writer = io.open(output_name, adios2.Mode.Write)
+        for step in range(n_steps):
+            buf[:] = step  # simulate computation result
+            writer.begin_step()
+            writer.put(var, buf)
+            writer.end_step()
 
-                if step % 10 == 0:
-                    elapsed = time.time() - t0
-                    pct = 100.0 * step / n_steps
-                    mb_written = (step + 1) * transfer_size_bytes / (1024**2)
-                    print(f"[producer] step {step}/{n_steps} ({pct:.1f}%), "
-                          f"{mb_written:.0f} MB written, {elapsed:.1f}s elapsed")
+            if step % 100 == 0:
+                elapsed = time.time() - t0
+                pct = 100.0 * step / n_steps
+                mb_written = (step + 1) * transfer_size_bytes / (1024**2)
+                print(f"[producer] step {step}/{n_steps} ({pct:.1f}%), "
+                      f"{mb_written:.0f} MB written, {elapsed:.1f}s elapsed")
+        writer.close()
 
     except Exception as e:
         print(f"[producer] ERROR: {e}", file=sys.stderr)
@@ -66,7 +67,7 @@ def run_producer(output_name: str, data_size_bytes: int, transfer_size_bytes: in
 
     elapsed = time.time() - t0
     gb_written = data_size_bytes / (1024**3)
-    bw = gb_written / elapsed
+    bw = gb_written / elapsed if elapsed > 0 else 0
     print(f"[producer] DONE: {gb_written:.2f} GB in {elapsed:.1f}s ({bw:.2f} GB/s)")
 
 

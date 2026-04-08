@@ -73,6 +73,8 @@ cat > "${JOB_SCRIPT}" << SLURM_EOF
 source ${ROOT_DIR}/config.env
 eval "\$(conda shell.bash hook)" 2>/dev/null || true
 conda activate ${PYTHON_ENV} 2>/dev/null || source ${PYTHON_ENV}/bin/activate 2>/dev/null || true
+export PATH="${PYTHON_ENV}/bin:\${PATH}"
+export PYTHONUNBUFFERED=1
 module load ${ADIOS2_MODULE} 2>/dev/null || true
 
 export ADIOS2_CONFIG_FILE="${ROOT_DIR}/adios/adios2.xml"
@@ -85,37 +87,51 @@ mkdir -p "\${RENDEZVOUS_DIR}"
 cleanup() {
     echo "[cleanup] removing \${RENDEZVOUS_DIR} and analysis_out_*.bp"
     rm -rf "\${RENDEZVOUS_DIR}"
-    rm -f "${BEEGFS_PATH}"/analysis_out_*.bp
+    rm -rf "${BEEGFS_PATH}"/analysis_out_*.bp
 }
 trap cleanup EXIT ERR INT TERM
 
-echo "=== Stage 1: Producers (ADIOS SST write) ==="
+echo "=== Launching producer-consumer pairs (ADIOS SST) ==="
 T_STAGE1_START=\$(date +%s)
 
-# Launch N_TASKS producers simultaneously
-# Each producer writes STAGE1_GB GB via SST
+# Launch each producer-consumer pair with staggering:
+# 1. Start producer (it creates .sst rendezvous file)
+# 2. Wait for .sst file to appear (confirms producer is ready)
+# 3. Start consumer (connects via .sst file)
+# This avoids the race condition where consumers start before producers are ready.
 PRODUCER_PIDS=()
+CONSUMER_PIDS=()
 for i in \$(seq 0 $((N_TASKS-1))); do
+    SST_FILE="\${RENDEZVOUS_DIR}/sim_out_\${i}.sst"
+
+    # Launch producer
     python3 ${ROOT_DIR}/adios/producer_task.py \
         --output-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \
         --data-size-gb ${STAGE1_GB} \
         --transfer-size-mb 1 \
         > "${RESULTS_DIR}/producer_\${i}.log" 2>&1 &
     PRODUCER_PIDS+=(\$!)
-done
 
-echo "=== Stage 2: Consumers (ADIOS SST read) ==="
-T_STAGE2_START=\$(date +%s)
+    # Wait for SST rendezvous file (up to 30s)
+    WAITED=0
+    while [[ ! -f "\${SST_FILE}" ]] && [[ \${WAITED} -lt 30 ]]; do
+        sleep 0.5
+        WAITED=\$((WAITED+1))
+    done
+    if [[ ! -f "\${SST_FILE}" ]]; then
+        echo "WARNING: SST file \${SST_FILE} not created after 15s"
+    fi
 
-# Launch N_TASKS consumers — must run SIMULTANEOUSLY with producers
-CONSUMER_PIDS=()
-for i in \$(seq 0 $((N_TASKS-1))); do
+    # Launch consumer
     python3 ${ROOT_DIR}/adios/consumer_task.py \
         --input-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \
         --output-path "\${BEEGFS_PATH}/analysis_out_\${i}.bp" \
         > "${RESULTS_DIR}/consumer_\${i}.log" 2>&1 &
     CONSUMER_PIDS+=(\$!)
+
+    echo "  Pair \${i}: producer PID=\${PRODUCER_PIDS[-1]}, consumer PID=\${CONSUMER_PIDS[-1]}"
 done
+echo "All ${N_TASKS} pairs launched"
 
 # Wait for all and collect exit codes
 FAILED=0

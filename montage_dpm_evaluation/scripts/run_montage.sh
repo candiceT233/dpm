@@ -103,6 +103,12 @@ DIFF_DIR="\${WORK_DIR}/diffs"
 CORR_DIR="\${WORK_DIR}/corrected"
 mkdir -p "\${PROJ_DIR}" "\${DIFF_DIR}" "\${CORR_DIR}"
 
+cleanup() {
+    echo "[cleanup] removing \${WORK_DIR}"
+    rm -rf "\${WORK_DIR}"
+}
+trap cleanup EXIT INT TERM
+
 echo "=== Montage Pipeline: storage=${STORAGE}, nodes=${NODES} ==="
 echo "Work dir: \${WORK_DIR}"
 echo "Start: \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -110,96 +116,96 @@ echo "Start: \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # ── Stage 1: mImgtbl (metadata extraction) ─────────────────────────────────
 echo ""
 echo "--- Stage 1: mImgtbl ---"
-T1_START=\$(date +%s.%N)
+T1_START=\$(date +%s)
 mImgtbl "${RAW_DIR}" "\${WORK_DIR}/images.tbl"
-T1_END=\$(date +%s.%N)
-T1=\$(python3 -c "print(f'{${T1_END//[^0-9.]/} - ${T1_START//[^0-9.]/}:.3f}')" 2>/dev/null || echo "0")
+T1_END=\$(date +%s)
+T1=\$((T1_END - T1_START))
 echo "mImgtbl time: \${T1}s"
 
 # ── Stage 2: mProjExec (reprojection — parallel per image) ────────────────
 echo ""
 echo "--- Stage 2: mProjExec ---"
-T2_START=\$(date +%s.%N)
+T2_START=\$(date +%s)
 mProjExec -p "${RAW_DIR}" "\${WORK_DIR}/images.tbl" "${HDR_FILE}" "\${PROJ_DIR}" "\${WORK_DIR}/stats.tbl"
-T2_END=\$(date +%s.%N)
-T2=\$(python3 -c "print(f'{\${T2_END} - \${T2_START}:.3f}')")
+T2_END=\$(date +%s)
+T2=\$((T2_END - T2_START))
 echo "mProjExec time: \${T2}s"
 
 # ── Stage 3: mImgtbl (projected catalog) ───────────────────────────────────
 echo ""
 echo "--- Stage 3: mImgtbl (projected) ---"
-T3_START=\$(date +%s.%N)
+T3_START=\$(date +%s)
 mImgtbl "\${PROJ_DIR}" "\${WORK_DIR}/proj_images.tbl"
-T3_END=\$(date +%s.%N)
-T3=\$(python3 -c "print(f'{\${T3_END} - \${T3_START}:.3f}')")
+T3_END=\$(date +%s)
+T3=\$((T3_END - T3_START))
 echo "mImgtbl(proj) time: \${T3}s"
 
 # ── Stage 4: mOverlaps (identify pairs) ───────────────────────────────────
 echo ""
 echo "--- Stage 4: mOverlaps ---"
-T4_START=\$(date +%s.%N)
+T4_START=\$(date +%s)
 mOverlaps "\${WORK_DIR}/proj_images.tbl" "\${WORK_DIR}/diffs.tbl"
-T4_END=\$(date +%s.%N)
-T4=\$(python3 -c "print(f'{\${T4_END} - \${T4_START}:.3f}')")
+T4_END=\$(date +%s)
+T4=\$((T4_END - T4_START))
 N_PAIRS=\$(wc -l < "\${WORK_DIR}/diffs.tbl" || echo "0")
 echo "mOverlaps time: \${T4}s (\${N_PAIRS} pairs)"
 
 # ── Stage 5: mDiffExec (differencing — parallel per pair) ─────────────────
 echo ""
 echo "--- Stage 5: mDiffExec ---"
-T5_START=\$(date +%s.%N)
+T5_START=\$(date +%s)
 mDiffExec -p "\${PROJ_DIR}" "\${WORK_DIR}/diffs.tbl" "${HDR_FILE}" "\${DIFF_DIR}"
-T5_END=\$(date +%s.%N)
-T5=\$(python3 -c "print(f'{\${T5_END} - \${T5_START}:.3f}')")
+T5_END=\$(date +%s)
+T5=\$((T5_END - T5_START))
 echo "mDiffExec time: \${T5}s"
 
 # ── Stage 6: mFitExec (plane fitting — parallel per pair) ─────────────────
 echo ""
 echo "--- Stage 6: mFitExec ---"
-T6_START=\$(date +%s.%N)
+T6_START=\$(date +%s)
 mFitExec "\${WORK_DIR}/diffs.tbl" "\${WORK_DIR}/fits.tbl" "\${DIFF_DIR}"
-T6_END=\$(date +%s.%N)
-T6=\$(python3 -c "print(f'{\${T6_END} - \${T6_START}:.3f}')")
+T6_END=\$(date +%s)
+T6=\$((T6_END - T6_START))
 echo "mFitExec time: \${T6}s"
 
 # ── Stage 7: mBgModel (background modeling — serial) ──────────────────────
 echo ""
 echo "--- Stage 7: mBgModel ---"
-T7_START=\$(date +%s.%N)
+T7_START=\$(date +%s)
 mBgModel "\${WORK_DIR}/proj_images.tbl" "\${WORK_DIR}/fits.tbl" "\${WORK_DIR}/corrections.tbl"
-T7_END=\$(date +%s.%N)
-T7=\$(python3 -c "print(f'{\${T7_END} - \${T7_START}:.3f}')")
+T7_END=\$(date +%s)
+T7=\$((T7_END - T7_START))
 echo "mBgModel time: \${T7}s"
 
 # ── Stage 8: mBgExec (background correction — parallel per image) ─────────
 echo ""
 echo "--- Stage 8: mBgExec ---"
-T8_START=\$(date +%s.%N)
+T8_START=\$(date +%s)
 mBgExec -p "\${PROJ_DIR}" "\${WORK_DIR}/proj_images.tbl" "\${WORK_DIR}/corrections.tbl" "\${CORR_DIR}"
-T8_END=\$(date +%s.%N)
-T8=\$(python3 -c "print(f'{\${T8_END} - \${T8_START}:.3f}')")
+T8_END=\$(date +%s)
+T8=\$((T8_END - T8_START))
 echo "mBgExec time: \${T8}s"
 
 # ── Stage 9: mImgtbl (corrected catalog) ──────────────────────────────────
 echo ""
 echo "--- Stage 9: mImgtbl (corrected) ---"
-T9_START=\$(date +%s.%N)
+T9_START=\$(date +%s)
 mImgtbl "\${CORR_DIR}" "\${WORK_DIR}/corr_images.tbl"
-T9_END=\$(date +%s.%N)
-T9=\$(python3 -c "print(f'{\${T9_END} - \${T9_START}:.3f}')")
+T9_END=\$(date +%s)
+T9=\$((T9_END - T9_START))
 echo "mImgtbl(corr) time: \${T9}s"
 
 # ── Stage 10: mAdd (coaddition — serial) ──────────────────────────────────
 echo ""
 echo "--- Stage 10: mAdd ---"
-T10_START=\$(date +%s.%N)
+T10_START=\$(date +%s)
 mAdd -p "\${CORR_DIR}" "\${WORK_DIR}/corr_images.tbl" "${HDR_FILE}" "\${WORK_DIR}/mosaic.fits"
-T10_END=\$(date +%s.%N)
-T10=\$(python3 -c "print(f'{\${T10_END} - \${T10_START}:.3f}')")
+T10_END=\$(date +%s)
+T10=\$((T10_END - T10_START))
 echo "mAdd time: \${T10}s"
 
 # ── Collect results ───────────────────────────────────────────────────────
-T_TOTAL=\$(python3 -c "print(f'{\${T10_END} - \${T1_START}:.3f}')")
+T_TOTAL=\$((T10_END - T1_START))
 
 # Measure intermediate data sizes
 PROJ_SIZE=\$(du -sb "\${PROJ_DIR}" | cut -f1)
@@ -242,8 +248,7 @@ cat "${RESULTS_DIR}/result.txt"
 echo ""
 echo "End: \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Cleanup work directory (keep results)
-rm -rf "\${WORK_DIR}"
+# Cleanup handled by trap
 SLURM_BODY
 
 echo "Submitting: sbatch ${JOB_SCRIPT}"

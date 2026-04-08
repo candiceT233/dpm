@@ -1,9 +1,8 @@
 #!/bin/bash
 # run_storage.sh — Run the synthetic workflow using file-based storage (DPM config)
 #
-# Uses IOR for I/O operations with the SAME transfer-size parameters that DPM
-# profiled (sw 1MB for stage1, rr 4KB for stage2, sr 1MB for stage3), so that
-# DPM score predictions are directly comparable to measured times.
+# Uses IOR for I/O operations with sequential 1MB transfers for all stages,
+# matching the ADIOS SST consumer's sequential read pattern for fair comparison.
 #
 # Falls back to Python I/O script if IOR is not available on the cluster.
 #
@@ -153,10 +152,10 @@ STAGE1_TIME=\$((T_STAGE1_END - T_STAGE1_START))
 echo "Stage 1 time: \${STAGE1_TIME}s (${N_TASKS} tasks, failed=\${STAGE1_FAILED})"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2: N parallel analysis tasks — random read 4KB, then sequential write 1MB
-# (matches DPM IOR profiling pattern: ior -a POSIX -r -z -t 4k / -w -t 1m)
+# Stage 2: N parallel analysis tasks — sequential read 1MB, then sequential write 1MB
+# (matches ADIOS consumer pattern: sequential step-by-step read of producer output)
 # ─────────────────────────────────────────────────────────────────────────────
-echo "=== Stage 2: Analysis tasks (random read 4KB + seq write) ==="
+echo "=== Stage 2: Analysis tasks (seq read 1MB + seq write 1MB) ==="
 T_STAGE2_START=\$(date +%s)
 
 PIDS=()
@@ -166,39 +165,39 @@ for i in \$(seq 0 $((N_TASKS-1))); do
     STAGE2_MB=\$(python3 -c "print(int(${STAGE2_BYTES} / 1024**2))")
     (
     if [[ \${USE_IOR} -eq 1 ]]; then
-        # IOR random read with 4KB transfer — same pattern DPM profiled
-        ior -a POSIX -r -z -t 4k -b \${STAGE2_MB}m -o "\${IN_FILE}" \
+        # IOR sequential read with 1MB transfer — matches ADIOS consumer pattern
+        ior -a POSIX -r -t 1m -b \${STAGE2_MB}m -o "\${IN_FILE}" \
             -F -k 2>&1
         # Sequential write of reduced output
         ior -a POSIX -w -t 1m -b \${STAGE2_MB}m -o "\${OUT_FILE}" \
             -F -k 2>&1
     else
-        # Python fallback: random read in 4KB chunks, sequential write
+        # Python fallback: sequential read in 1MB chunks, sequential write
         export PY_IN_FILE="\${IN_FILE}" PY_OUT_FILE="\${OUT_FILE}" PY_IN_SIZE=${STAGE1_BYTES} PY_OUT_SIZE=${STAGE2_BYTES} PY_TASK="\${i}"
         python3 - <<'PYEOF'
-import sys, os, random
+import sys, os
 in_f = os.environ["PY_IN_FILE"]
 out_f = os.environ["PY_OUT_FILE"]
 in_size = int(os.environ["PY_IN_SIZE"])
 out_size = int(os.environ["PY_OUT_SIZE"])
 task = os.environ["PY_TASK"]
-chunk_r = 4096          # 4KB random read
-chunk_w = 1024 * 1024   # 1MB sequential write
-n_reads = in_size // chunk_r
-buf_w = b'\x00' * chunk_w
+chunk = 1024 * 1024     # 1MB sequential read/write
+buf_w = b'\x00' * chunk
+read_total = 0
 written = 0
 with open(in_f, 'rb') as fin, open(out_f, 'wb') as fout:
-    for _ in range(n_reads):
-        offset = random.randint(0, max(0, in_size - chunk_r))
-        fin.seek(offset)
-        fin.read(chunk_r)
+    while read_total < in_size:
+        data = fin.read(min(chunk, in_size - read_total))
+        if not data:
+            break
+        read_total += len(data)
     while written < out_size:
-        n = min(chunk_w, out_size - written)
+        n = min(chunk, out_size - written)
         fout.write(buf_w[:n])
         written += n
     fout.flush()
     os.fsync(fout.fileno())
-print(f"[analysis_{task}] random-read {n_reads} x 4KB, wrote {written/(1024**2):.1f} MB")
+print(f"[analysis_{task}] seq-read {read_total/(1024**2):.1f} MB, wrote {written/(1024**2):.1f} MB")
 PYEOF
     fi
     ) > "${RESULTS_DIR}/stage2_\${i}.log" 2>&1 &
