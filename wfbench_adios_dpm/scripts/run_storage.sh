@@ -3,8 +3,7 @@
 #
 # Uses IOR for I/O operations with sequential 1MB transfers for all stages,
 # matching the ADIOS SST consumer's sequential read pattern for fair comparison.
-#
-# Falls back to Python I/O script if IOR is not available on the cluster.
+# Tasks are distributed across all allocated nodes via srun.
 #
 # Usage:
 #   bash scripts/run_storage.sh --size small  --storage tmpfs  --nodes 4
@@ -37,6 +36,12 @@ case "${STORAGE}" in
     *)      echo "Unknown storage: ${STORAGE}"; exit 1 ;;
 esac
 
+# Storage is node-local (SSD/tmpfs) or shared (BeeGFS)
+NODE_LOCAL=0
+if [[ "${STORAGE}" == "ssd" || "${STORAGE}" == "tmpfs" ]]; then
+    NODE_LOCAL=1
+fi
+
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_ID="${STORAGE}_${SIZE}_${NODES}n_${TIMESTAMP}"
 RESULTS_DIR="${ROOT_DIR}/results/${RUN_ID}"
@@ -44,30 +49,27 @@ mkdir -p "${RESULTS_DIR}"
 
 echo "=== Storage run: size=${SIZE}, storage=${STORAGE}, nodes=${NODES} ==="
 echo "    Storage path: ${STORAGE_PATH}"
+echo "    Node-local: ${NODE_LOCAL}"
 echo "    Results: ${RESULTS_DIR}"
 
 # ── Extract metadata from workflow JSON ───────────────────────────────────────
 WORKFLOW_JSON="${ROOT_DIR}/wfbench/workflow_${SIZE}_${NODES}n.json"
-# Fallback to 4-node JSON if per-node-count JSON not generated yet
 if [[ ! -f "${WORKFLOW_JSON}" ]]; then
     WORKFLOW_JSON="${ROOT_DIR}/wfbench/workflow_${SIZE}.json"
 fi
 if [[ ! -f "${WORKFLOW_JSON}" ]]; then
     echo "ERROR: ${WORKFLOW_JSON} not found."
-    echo "Run: python wfbench/generate_workflow.py --size ${SIZE} --nodes ${NODES} --mem-per-node \${MEM_PER_NODE_GB}"
     exit 1
 fi
 
 STAGE1_BYTES=$(python3 -c "import json; wf=json.load(open('${WORKFLOW_JSON}')); print(wf['dpmMeta']['stage1FileSizeBytes'])")
 STAGE2_BYTES=$(python3 -c "import json; wf=json.load(open('${WORKFLOW_JSON}')); print(wf['dpmMeta']['stage2FileSizeBytes'])")
-N_TASKS=$(python3 -c "import json; wf=json.load(open('${WORKFLOW_JSON}')); print(sum(1 for t in wf['workflow']['specification']['tasks'] if t['category']=='sim'))")
-
-# For phase 3 scaling: N_TASKS from the JSON may not match NODES if JSON was 4-node
-# Override N_TASKS based on actual NODES × TASKS_PER_NODE
 N_TASKS=$((NODES * TASKS_PER_NODE))
+STAGE1_MB=$(python3 -c "print(int(${STAGE1_BYTES} / 1024**2))")
+STAGE2_MB=$(python3 -c "print(int(${STAGE2_BYTES} / 1024**2))")
 
-echo "    Stage1: ${STAGE1_BYTES} bytes per task, ${N_TASKS} tasks"
-echo "    Stage2: ${STAGE2_BYTES} bytes per task (1/8 reduction)"
+echo "    Stage1: ${STAGE1_BYTES} bytes (${STAGE1_MB} MB) per task, ${N_TASKS} tasks"
+echo "    Stage2: ${STAGE2_BYTES} bytes (${STAGE2_MB} MB) per task"
 
 # ── Write Slurm job script ────────────────────────────────────────────────────
 JOB_SCRIPT="${RESULTS_DIR}/job_storage_${STORAGE}.sh"
@@ -77,20 +79,27 @@ cat > "${JOB_SCRIPT}" << SLURM_EOF
 #SBATCH --partition=${PARTITION}
 #SBATCH --account=${ACCOUNT}
 #SBATCH --nodes=${NODES}
-#SBATCH --ntasks-per-node=${CORES_PER_NODE}
+#SBATCH --ntasks-per-node=${TASKS_PER_NODE}
 #SBATCH --time=04:00:00
 #SBATCH --output=${RESULTS_DIR}/slurm_%j.out
 #SBATCH --error=${RESULTS_DIR}/slurm_%j.err
 
+set -eo pipefail
 source ${ROOT_DIR}/config.env
 eval "\$(conda shell.bash hook)" 2>/dev/null || true
 conda activate ${PYTHON_ENV} 2>/dev/null || source ${PYTHON_ENV}/bin/activate 2>/dev/null || true
-module load ${ADIOS2_MODULE} 2>/dev/null || true
+set -u
 
-# Detect IOR — use it if available, else fall back to Python I/O script
+# ── Node list ─────────────────────────────────────────────────────────────────
+NODELIST=(\$(scontrol show hostnames \${SLURM_JOB_NODELIST}))
+NUM_NODES=\${#NODELIST[@]}
+echo "[run_storage] Nodes (\${NUM_NODES}): \${NODELIST[*]}"
+echo "[run_storage] Tasks per node: ${TASKS_PER_NODE}, total tasks: ${N_TASKS}"
+
+# Detect IOR
 IOR_BIN=\$(which ior 2>/dev/null || echo "")
 if [[ -z "\${IOR_BIN}" ]]; then
-    echo "[run_storage] IOR not found — using Python fallback for I/O patterns"
+    echo "[run_storage] IOR not found — using dd fallback"
     USE_IOR=0
 else
     echo "[run_storage] Using IOR: \${IOR_BIN}"
@@ -98,48 +107,59 @@ else
 fi
 
 WORK_DIR="${STORAGE_PATH}/dpm_eval_\${SLURM_JOB_ID}"
-mkdir -p "\${WORK_DIR}"
+NODE_LOCAL=${NODE_LOCAL}
+BEEGFS_AGG="${BEEGFS_PATH}/agg_tmp_\${SLURM_JOB_ID}"
 
-# Cleanup on exit, timeout, or kill — prevents orphaned data on local/shared storage
-cleanup() { echo "[cleanup] removing \${WORK_DIR}"; rm -rf "\${WORK_DIR}"; }
-trap cleanup EXIT ERR INT TERM
+# Create work dirs — on all nodes for node-local, once for shared
+if [[ \${NODE_LOCAL} -eq 1 ]]; then
+    for node in "\${NODELIST[@]}"; do
+        srun --nodes=1 --ntasks=1 --nodelist="\${node}" mkdir -p "\${WORK_DIR}" &
+    done
+    wait
+    mkdir -p "\${BEEGFS_AGG}"
+else
+    mkdir -p "\${WORK_DIR}"
+fi
+
+# Cleanup on all nodes
+cleanup() {
+    echo "[cleanup] removing work dirs"
+    if [[ \${NODE_LOCAL} -eq 1 ]]; then
+        for node in "\${NODELIST[@]}"; do
+            srun --nodes=1 --ntasks=1 --nodelist="\${node}" rm -rf "\${WORK_DIR}" 2>/dev/null &
+        done
+        rm -rf "\${BEEGFS_AGG}" 2>/dev/null &
+        wait
+    else
+        rm -rf "\${WORK_DIR}"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# Helper: get target node for task i
+node_for_task() {
+    echo "\${NODELIST[\$(( \$1 / ${TASKS_PER_NODE} ))]}"
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1: N parallel sim tasks — sequential write, 1MB transfer size
-# (matches DPM IOR profiling pattern: ior -a POSIX -w -t 1m)
+# Each task pinned to its assigned node via srun
 # ─────────────────────────────────────────────────────────────────────────────
 echo "=== Stage 1: Sim tasks (sequential write, 1MB xfer) ==="
 T_STAGE1_START=\$(date +%s)
 
 PIDS=()
 for i in \$(seq 0 $((N_TASKS-1))); do
+    TARGET_NODE=\$(node_for_task \${i})
     OUT_FILE="\${WORK_DIR}/sim_out_\${i}.bin"
-    STAGE1_MB=\$(python3 -c "print(int(${STAGE1_BYTES} / 1024**2))")
     (
+    echo "[task \${i}] node=\${TARGET_NODE}"
     if [[ \${USE_IOR} -eq 1 ]]; then
-        # IOR sequential write, 1MB transfer — same pattern DPM profiled
-        ior -a POSIX -w -t 1m -b \${STAGE1_MB}m -o "\${OUT_FILE}" \
-            -F -k 2>&1
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
+            ior -a POSIX -w -t 1m -b ${STAGE1_MB}m -o "\${OUT_FILE}" -F -k 2>&1
     else
-        # Python fallback: sequential write in 1MB chunks
-        export PY_OUT_FILE="\${OUT_FILE}" PY_SIZE=${STAGE1_BYTES} PY_TASK="\${i}"
-        python3 - <<'PYEOF'
-import sys, os
-out = os.environ["PY_OUT_FILE"]
-size = int(os.environ["PY_SIZE"])
-task = os.environ["PY_TASK"]
-chunk = 1024 * 1024  # 1MB
-buf = b'\x00' * chunk
-written = 0
-with open(out, 'wb') as f:
-    while written < size:
-        n = min(chunk, size - written)
-        f.write(buf[:n])
-        written += n
-    f.flush()
-    os.fsync(f.fileno())
-print(f"[sim_{task}] wrote {written/(1024**3):.2f} GB to {out}")
-PYEOF
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
+            dd if=/dev/zero bs=1M count=${STAGE1_MB} of="\${OUT_FILE}" conv=fdatasync 2>&1
     fi
     ) > "${RESULTS_DIR}/stage1_\${i}.log" 2>&1 &
     PIDS+=(\$!)
@@ -152,53 +172,27 @@ STAGE1_TIME=\$((T_STAGE1_END - T_STAGE1_START))
 echo "Stage 1 time: \${STAGE1_TIME}s (${N_TASKS} tasks, failed=\${STAGE1_FAILED})"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2: N parallel analysis tasks — sequential read 1MB, then sequential write 1MB
-# (matches ADIOS consumer pattern: sequential step-by-step read of producer output)
+# Stage 2: N parallel analysis tasks — seq read 1MB + seq write 1MB
+# Each task pinned to its assigned node via srun
 # ─────────────────────────────────────────────────────────────────────────────
 echo "=== Stage 2: Analysis tasks (seq read 1MB + seq write 1MB) ==="
 T_STAGE2_START=\$(date +%s)
 
 PIDS=()
 for i in \$(seq 0 $((N_TASKS-1))); do
+    TARGET_NODE=\$(node_for_task \${i})
     IN_FILE="\${WORK_DIR}/sim_out_\${i}.bin"
     OUT_FILE="\${WORK_DIR}/analysis_out_\${i}.bin"
-    STAGE2_MB=\$(python3 -c "print(int(${STAGE2_BYTES} / 1024**2))")
     (
+    echo "[task \${i}] node=\${TARGET_NODE}"
     if [[ \${USE_IOR} -eq 1 ]]; then
-        # IOR sequential read with 1MB transfer — matches ADIOS consumer pattern
-        ior -a POSIX -r -t 1m -b \${STAGE2_MB}m -o "\${IN_FILE}" \
-            -F -k 2>&1
-        # Sequential write of reduced output
-        ior -a POSIX -w -t 1m -b \${STAGE2_MB}m -o "\${OUT_FILE}" \
-            -F -k 2>&1
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
+            ior -a POSIX -r -t 1m -b ${STAGE2_MB}m -o "\${IN_FILE}" -F -k 2>&1
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
+            ior -a POSIX -w -t 1m -b ${STAGE2_MB}m -o "\${OUT_FILE}" -F -k 2>&1
     else
-        # Python fallback: sequential read in 1MB chunks, sequential write
-        export PY_IN_FILE="\${IN_FILE}" PY_OUT_FILE="\${OUT_FILE}" PY_IN_SIZE=${STAGE1_BYTES} PY_OUT_SIZE=${STAGE2_BYTES} PY_TASK="\${i}"
-        python3 - <<'PYEOF'
-import sys, os
-in_f = os.environ["PY_IN_FILE"]
-out_f = os.environ["PY_OUT_FILE"]
-in_size = int(os.environ["PY_IN_SIZE"])
-out_size = int(os.environ["PY_OUT_SIZE"])
-task = os.environ["PY_TASK"]
-chunk = 1024 * 1024     # 1MB sequential read/write
-buf_w = b'\x00' * chunk
-read_total = 0
-written = 0
-with open(in_f, 'rb') as fin, open(out_f, 'wb') as fout:
-    while read_total < in_size:
-        data = fin.read(min(chunk, in_size - read_total))
-        if not data:
-            break
-        read_total += len(data)
-    while written < out_size:
-        n = min(chunk, out_size - written)
-        fout.write(buf_w[:n])
-        written += n
-    fout.flush()
-    os.fsync(fout.fileno())
-print(f"[analysis_{task}] seq-read {read_total/(1024**2):.1f} MB, wrote {written/(1024**2):.1f} MB")
-PYEOF
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" bash -c \
+            "dd if='\${IN_FILE}' of=/dev/null bs=1M 2>&1 && dd if=/dev/zero bs=1M count=${STAGE2_MB} of='\${OUT_FILE}' conv=fdatasync 2>&1"
     fi
     ) > "${RESULTS_DIR}/stage2_\${i}.log" 2>&1 &
     PIDS+=(\$!)
@@ -211,11 +205,33 @@ STAGE2_TIME=\$((T_STAGE2_END - T_STAGE2_START))
 echo "Stage 2 time: \${STAGE2_TIME}s (failed=\${STAGE2_FAILED})"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 3: Aggregate — sequential read all analysis outputs, write summary
+# Stage 3: Aggregate — for node-local storage, gather partials via BeeGFS
 # ─────────────────────────────────────────────────────────────────────────────
 echo "=== Stage 3: Aggregation (sequential read + write) ==="
 T_STAGE3_START=\$(date +%s)
-cat "\${WORK_DIR}"/analysis_out_*.bin* > "\${WORK_DIR}/aggregate_out.bin" 2>&1 || true
+
+if [[ \${NODE_LOCAL} -eq 1 ]]; then
+    # Phase A: each node concatenates its local analysis outputs to BeeGFS
+    PIDS=()
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        TARGET_NODE=\${NODELIST[\$node_idx]}
+        FIRST=\$((node_idx * ${TASKS_PER_NODE}))
+        LAST=\$((FIRST + ${TASKS_PER_NODE} - 1))
+        FILE_LIST=""
+        for t in \$(seq \${FIRST} \${LAST}); do
+            FILE_LIST="\${FILE_LIST} \${WORK_DIR}/analysis_out_\${t}.bin*"
+        done
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
+            bash -c "cat \${FILE_LIST} > \${BEEGFS_AGG}/partial_\${node_idx}.bin" &
+        PIDS+=(\$!)
+    done
+    for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+    # Phase B: combine partials on batch node
+    cat "\${BEEGFS_AGG}"/partial_*.bin > "\${BEEGFS_AGG}/aggregate_out.bin" 2>&1 || true
+else
+    cat "\${WORK_DIR}"/analysis_out_*.bin* > "\${WORK_DIR}/aggregate_out.bin" 2>&1 || true
+fi
+
 T_STAGE3_END=\$(date +%s)
 STAGE3_TIME=\$((T_STAGE3_END - T_STAGE3_START))
 echo "Stage 3 time: \${STAGE3_TIME}s"
@@ -224,7 +240,6 @@ T_TOTAL=\$((T_STAGE3_END - T_STAGE1_START))
 TOTAL_FAILED=\$((STAGE1_FAILED + STAGE2_FAILED))
 STATUS=\$([ \${TOTAL_FAILED} -eq 0 ] && echo "SUCCESS" || echo "FAILED")
 
-# Write result.txt in format collect_results.sh expects
 {
 echo "RESULT: size=${SIZE}, backend=${STORAGE}, nodes=${NODES}"
 echo "stage1_time_s=\${STAGE1_TIME}"
@@ -234,10 +249,10 @@ echo "total_time_s=\${T_TOTAL}"
 echo "failed_tasks=\${TOTAL_FAILED}"
 echo "status=\${STATUS}"
 echo "ior_used=\${USE_IOR}"
+echo "nodelist=\${NODELIST[*]}"
+echo "multinode=true"
 } > "${RESULTS_DIR}/result.txt"
 cat "${RESULTS_DIR}/result.txt"
-
-# Cleanup handled by trap — no explicit rm needed here
 SLURM_EOF
 
 echo "Submitting: sbatch ${JOB_SCRIPT}"
