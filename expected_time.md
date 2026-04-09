@@ -32,15 +32,15 @@
 - v2 (640636–640646): no computation but wrote ALL data (8x more I/O than file-based)
 - All archived. See FAIRNESS_FIX_NOTES.md for details.
 
-## Running — ADIOS SST v3 (fair: 1/8 reduction, BP5 output, 4h limit)
+## ADIOS SST v3 (fair: 1/8 reduction, BP5 output, 4h limit)
 
-| Job ID | Config | Status |
-|--------|--------|--------|
-| 640699 | adios_small_8n | running |
-| 640701 | adios_medium_8n | running |
-| 640703 | adios_large_8n | running |
-| 640705 | adios_small_16n | running |
-| 640707 | adios_medium_16n | running |
+| Job ID | Config | Stage 1+2 | Stage 3 | Total | Status |
+|--------|--------|-----------|---------|-------|--------|
+| 640699 | adios_small_8n | 197s | 46s | **243s (4:03)** | SUCCESS |
+| 640701 | adios_medium_8n | | | running (9 min) | |
+| 640703 | adios_large_8n | | | running (9 min) | |
+| 640705 | adios_small_16n | 194s | 85s | **279s (4:39)** | FAILED (2/32) |
+| 640707 | adios_medium_16n | | | running (9 min) | |
 | 640709 | adios_large_16n | running |
 
 ## Completed — WfBench tmpfs w/ scp staging
@@ -59,7 +59,9 @@
 | Job ID | Config | Stage1 | scp 1→2 | Stage2 | scp 2→3 | Total | Status |
 |--------|--------|--------|---------|--------|---------|-------|--------|
 | 640650 | ssd_small_8n | 27s | 295s | 3s | 222s | **585s** | SUCCESS (scp=88%) |
+| 640654 | ssd_medium_8n | 370s | 1447s | 24s | 1047s | **2933s** | FAILED (3/16, scp=85%) |
 | 640662 | ssd_small_16n | — | 250s | — | 379s | **716s** | SUCCESS (scp=88%) |
+| 640670 | ssd_large_16n | — | — | — | — | 35:53 | **FAILED** (SSD full — 400GB > 477GB) |
 
 ## Completed — Montage synth_small
 

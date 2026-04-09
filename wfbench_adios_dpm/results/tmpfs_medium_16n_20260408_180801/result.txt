@@ -1,0 +1,13 @@
+RESULT: size=medium, backend=tmpfs, nodes=16
+stage1_time_s=50
+staging_12_time_s=9
+stage2_time_s=1
+staging_23_time_s=24
+stage3_time_s=0
+total_staging_time_s=33
+total_time_s=84
+failed_tasks=48
+status=FAILED
+ior_used=1
+nodelist=dc054 dc055 dc056 dc057 dc059 dc060 dc061 dc062 dc211 dc212 dc213 dc214 dc215 dc216 dc217 dc218
+multinode=true
