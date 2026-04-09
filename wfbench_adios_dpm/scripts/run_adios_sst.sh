@@ -97,51 +97,78 @@ node_for_task() {
 echo "=== Launching producer-consumer pairs (ADIOS SST, multinode) ==="
 T_STAGE1_START=\$(date +%s)
 
-PRODUCER_PIDS=()
-CONSUMER_PIDS=()
+# Generate per-node wrapper scripts that launch producer+consumer pairs locally.
+# This avoids srun timing issues — both processes start together on the same node.
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    SCRIPT="\${RENDEZVOUS_DIR}/node_\${node_idx}.sh"
+    cat > "\${SCRIPT}" << 'NODEEOF'
+#!/bin/bash
+set -eo pipefail
+NODEEOF
+done
+
 for i in \$(seq 0 $((N_TASKS-1))); do
-    TARGET_NODE=\$(node_for_task \${i})
-    SST_FILE="\${RENDEZVOUS_DIR}/sim_out_\${i}.sst"
+    node_idx=\$(( i / ${TASKS_PER_NODE} ))
+    SCRIPT="\${RENDEZVOUS_DIR}/node_\${node_idx}.sh"
+    cat >> "\${SCRIPT}" << PAIREOF
+# --- Pair \${i} ---
+python3 ${ROOT_DIR}/adios/producer_task.py \\
+    --output-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \\
+    --data-size-gb ${STAGE1_GB} \\
+    --transfer-size-mb 1 \\
+    > "${RESULTS_DIR}/producer_\${i}.log" 2>&1 &
+PROD_PID_\${i}=\\\$!
 
-    # Launch producer on target node
-    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
-        python3 ${ROOT_DIR}/adios/producer_task.py \
-        --output-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \
-        --data-size-gb ${STAGE1_GB} \
-        --transfer-size-mb 1 \
-        > "${RESULTS_DIR}/producer_\${i}.log" 2>&1 &
-    PRODUCER_PIDS+=(\$!)
-
-    # Wait for SST rendezvous file (up to 30s)
-    WAITED=0
-    while [[ ! -f "\${SST_FILE}" ]] && [[ \${WAITED} -lt 30 ]]; do
-        sleep 0.5
-        WAITED=\$((WAITED+1))
-    done
-    if [[ ! -f "\${SST_FILE}" ]]; then
-        echo "WARNING: SST file \${SST_FILE} not created after 15s"
-    fi
-
-    # Launch consumer on same node (SST shared-memory transport)
-    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
-        python3 ${ROOT_DIR}/adios/consumer_task.py \
-        --input-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \
-        --output-path "${BEEGFS_PATH}/analysis_out_\${i}.bp" \
-        > "${RESULTS_DIR}/consumer_\${i}.log" 2>&1 &
-    CONSUMER_PIDS+=(\$!)
-
-    echo "  Pair \${i}: node=\${TARGET_NODE}, producer=\${PRODUCER_PIDS[-1]}, consumer=\${CONSUMER_PIDS[-1]}"
+# Wait for SST rendezvous file
+WAITED=0
+while [[ ! -f "\${RENDEZVOUS_DIR}/sim_out_\${i}.sst" ]] && [[ \\\${WAITED} -lt 60 ]]; do
+    sleep 0.2
+    WAITED=\\\$((WAITED+1))
 done
-echo "All ${N_TASKS} pairs launched across \${NUM_NODES} nodes"
 
-# Wait for all and collect exit codes
+python3 ${ROOT_DIR}/adios/consumer_task.py \\
+    --input-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \\
+    --output-path "${BEEGFS_PATH}/analysis_out_\${i}.bp" \\
+    > "${RESULTS_DIR}/consumer_\${i}.log" 2>&1 &
+CONS_PID_\${i}=\\\$!
+
+echo "  Pair \${i}: producer=\\\${PROD_PID_\${i}}, consumer=\\\${CONS_PID_\${i}}"
+PAIREOF
+done
+
+# Add wait for all pairs at end of each node script
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    SCRIPT="\${RENDEZVOUS_DIR}/node_\${node_idx}.sh"
+    echo "wait" >> "\${SCRIPT}"
+    chmod +x "\${SCRIPT}"
+done
+
+# Launch one srun per node
+PIDS=()
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    TARGET_NODE=\${NODELIST[\$node_idx]}
+    echo "Launching node \${node_idx} (\${TARGET_NODE}): ${TASKS_PER_NODE} pairs"
+    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
+        bash "\${RENDEZVOUS_DIR}/node_\${node_idx}.sh" &
+    PIDS+=(\$!)
+done
+
+# Wait and collect exit codes
 FAILED=0
-for pid in "\${PRODUCER_PIDS[@]}"; do
+for pid in "\${PIDS[@]}"; do
     wait "\${pid}" || FAILED=\$((FAILED+1))
 done
-for pid in "\${CONSUMER_PIDS[@]}"; do
-    wait "\${pid}" || FAILED=\$((FAILED+1))
+# Count actual task failures from logs
+TASK_FAILURES=0
+for i in \$(seq 0 $((N_TASKS-1))); do
+    if grep -q "ERROR\|MEMORY ERROR" "${RESULTS_DIR}/consumer_\${i}.log" 2>/dev/null; then
+        TASK_FAILURES=\$((TASK_FAILURES+1))
+    fi
+    if grep -q "ERROR\|MEMORY ERROR" "${RESULTS_DIR}/producer_\${i}.log" 2>/dev/null; then
+        TASK_FAILURES=\$((TASK_FAILURES+1))
+    fi
 done
+FAILED=\${TASK_FAILURES}
 
 T_END=\$(date +%s)
 STAGE1_TIME=\$((T_END - T_STAGE1_START))

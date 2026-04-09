@@ -1,17 +1,16 @@
 #!/bin/bash
 # run_montage.sh — Run Montage pipeline on specified storage and node count
 #
-# Parallel Exec stages (mProjExec, mDiffExec, mFitExec, mBgExec) are split
-# across all allocated nodes via srun. Serial stages run on a single node.
+# Parallel stages use individual Montage commands (mProject, mDiff, mFitplane,
+# mBackground) distributed across all nodes via srun --ntasks=1. This gives
+# Slurm-visible task distribution instead of relying on internal fork parallelism.
 #
-# For BeeGFS: all I/O on shared filesystem, straightforward multinode.
-# For SSD: since Montage stages are interdependent and require shared data access,
-#   SSD mode uses node-local SSD for the heavy compute/I/O stages (mProjExec,
-#   mBgExec) and BeeGFS for inter-stage data. Data movement times are recorded.
+# For BeeGFS: all I/O on shared filesystem.
+# For SSD/tmpfs: heavy stages on per-node local storage with measured staging.
 #
 # Usage:
-#   bash scripts/run_montage.sh --size large --storage ssd    --nodes 4
-#   bash scripts/run_montage.sh --size large --storage beegfs --nodes 8
+#   bash scripts/run_montage.sh --size small --storage beegfs --nodes 4
+#   bash scripts/run_montage.sh --size large --storage ssd    --nodes 8
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +30,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Map storage name to path
 case "${STORAGE}" in
     ssd)    STORAGE_PATH="${LOCAL_SSD_PATH}" ;;
     beegfs) STORAGE_PATH="${BEEGFS_PATH}"    ;;
@@ -39,38 +37,35 @@ case "${STORAGE}" in
     *)      echo "Unknown storage: ${STORAGE}"; exit 1 ;;
 esac
 
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_ID="${STORAGE}_${SIZE}_${NODES}n_${TIMESTAMP}"
-RESULTS_DIR="${ROOT_DIR}/results/${RUN_ID}"
-mkdir -p "${RESULTS_DIR}"
-
-# Input data
-DATA_DIR="${ROOT_DIR}/data/${SIZE}"
-RAW_DIR="${DATA_DIR}/raw_images"
-HDR_FILE="${DATA_DIR}/region.hdr"
-
-if [[ ! -f "${HDR_FILE}" ]]; then
-    echo "ERROR: region.hdr not found at ${HDR_FILE}"
-    echo "Run: bash scripts/download_data.sh --size ${SIZE}"
-    exit 1
-fi
-
-FITS_COUNT=$(ls "${RAW_DIR}"/*.fits 2>/dev/null | wc -l)
-if [[ "${FITS_COUNT}" -eq 0 ]]; then
-    echo "ERROR: No FITS files in ${RAW_DIR}"
-    exit 1
-fi
-
 NODE_LOCAL=0
 if [[ "${STORAGE}" == "ssd" || "${STORAGE}" == "tmpfs" ]]; then
     NODE_LOCAL=1
 fi
 
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RUN_ID="${STORAGE}_${SIZE}_${NODES}n_${TIMESTAMP}"
+RESULTS_DIR="${ROOT_DIR}/results/${RUN_ID}"
+mkdir -p "${RESULTS_DIR}"
+
+DATA_DIR="${ROOT_DIR}/data/${SIZE}"
+RAW_DIR="${DATA_DIR}/raw_images"
+HDR_FILE="${DATA_DIR}/region.hdr"
+
+if [[ ! -f "${HDR_FILE}" ]]; then
+    echo "ERROR: region.hdr not found at ${HDR_FILE}"; exit 1
+fi
+
+FITS_COUNT=$(ls "${RAW_DIR}"/*.fits 2>/dev/null | wc -l)
+if [[ "${FITS_COUNT}" -eq 0 ]]; then
+    echo "ERROR: No FITS files in ${RAW_DIR}"; exit 1
+fi
+
+TASKS_PER_NODE=${CORES_PER_NODE}
+
 echo "=== Montage DPM Evaluation ==="
 echo "    Size: ${SIZE} (${FITS_COUNT} FITS images)"
 echo "    Storage: ${STORAGE} (${STORAGE_PATH})"
-echo "    Node-local: ${NODE_LOCAL}"
-echo "    Nodes: ${NODES}"
+echo "    Nodes: ${NODES}, Tasks/node: ${TASKS_PER_NODE}"
 echo "    Results: ${RESULTS_DIR}"
 
 # ── Write Slurm job script ────────────────────────────────────────────────────
@@ -81,8 +76,7 @@ cat > "${JOB_SCRIPT}" << SLURM_EOF
 #SBATCH --partition=${PARTITION}
 #SBATCH --account=${ACCOUNT}
 #SBATCH --nodes=${NODES}
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=${CORES_PER_NODE}
+#SBATCH --ntasks-per-node=${TASKS_PER_NODE}
 #SBATCH --time=04:00:00
 #SBATCH --output=${RESULTS_DIR}/slurm_%j.out
 #SBATCH --error=${RESULTS_DIR}/slurm_%j.err
@@ -92,35 +86,25 @@ source ${ROOT_DIR}/config.env
 export PATH="${MONTAGE_BIN}:\${PATH}"
 set -u
 
-# Optional Darshan tracing
-if [[ -n "${DARSHAN_LIB}" ]] && [[ -f "${DARSHAN_LIB}" ]]; then
-    export LD_PRELOAD="${DARSHAN_LIB}"
-    export DARSHAN_LOG_DIR="${RESULTS_DIR}/darshan_logs"
-    mkdir -p "\${DARSHAN_LOG_DIR}"
-    echo "[montage] Darshan tracing enabled"
-fi
-
 # ── Node list ─────────────────────────────────────────────────────────────────
 NODELIST=(\$(scontrol show hostnames \${SLURM_JOB_NODELIST}))
 NUM_NODES=\${#NODELIST[@]}
+TOTAL_SLOTS=\$((NUM_NODES * ${TASKS_PER_NODE}))
 echo "[montage] Nodes (\${NUM_NODES}): \${NODELIST[*]}"
+echo "[montage] Tasks/node: ${TASKS_PER_NODE}, total slots: \${TOTAL_SLOTS}"
 
 NODE_LOCAL=${NODE_LOCAL}
-
-# Working directory: always on BeeGFS for shared access between stages.
-# For SSD mode, heavy stages use per-node SSD with measured data movement.
 WORK_DIR="${BEEGFS_PATH}/montage_eval_\${SLURM_JOB_ID}"
 PROJ_DIR="\${WORK_DIR}/projected"
 DIFF_DIR="\${WORK_DIR}/diffs"
 CORR_DIR="\${WORK_DIR}/corrected"
 mkdir -p "\${PROJ_DIR}" "\${DIFF_DIR}" "\${CORR_DIR}"
 
-# For SSD mode: per-node local dirs for heavy compute stages
 SSD_WORK="${STORAGE_PATH}/montage_eval_\${SLURM_JOB_ID}"
 if [[ \${NODE_LOCAL} -eq 1 ]]; then
     for node in "\${NODELIST[@]}"; do
         srun --nodes=1 --ntasks=1 --nodelist="\${node}" \
-            mkdir -p "\${SSD_WORK}/projected" "\${SSD_WORK}/raw_link" &
+            mkdir -p "\${SSD_WORK}/projected" "\${SSD_WORK}/raw_link" "\${SSD_WORK}/corrected" &
     done
     wait
 fi
@@ -137,219 +121,282 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Helper: round-robin node assignment
+node_for_idx() { echo "\${NODELIST[\$(( \$1 % NUM_NODES ))]}"; }
+
 echo "=== Montage Pipeline: storage=${STORAGE}, nodes=${NODES} ==="
-echo "Work dir: \${WORK_DIR}"
 echo "Start: \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# ── Helper: split a Montage .tbl file across N nodes ─────────────────────────
-# Montage tables: header lines start with \\ or |, data lines follow
-split_table() {
-    local TABLE=\$1 N_SPLITS=\$2 PREFIX=\$3
-    local HEADER_FILE="\${PREFIX}_header.tmp"
-
-    # Extract header lines (lines starting with \ or |)
-    # Use awk to avoid regex escaping issues
-    awk '/^[\\\\|]/' "\${TABLE}" > "\${HEADER_FILE}" 2>/dev/null || true
-    local HEADER_LINES=\$(wc -l < "\${HEADER_FILE}")
-
-    # Data lines (everything after header)
-    local TOTAL_LINES=\$(wc -l < "\${TABLE}")
-    local TOTAL_DATA=\$(( TOTAL_LINES - HEADER_LINES ))
-    if [[ \${TOTAL_DATA} -le 0 ]]; then
-        cp "\${TABLE}" "\${PREFIX}_0.tbl"
-        rm -f "\${HEADER_FILE}"
-        return
-    fi
-
-    local CHUNK=\$(( (TOTAL_DATA + N_SPLITS - 1) / N_SPLITS ))
-
-    for idx in \$(seq 0 \$((N_SPLITS - 1))); do
-        local START=\$(( idx * CHUNK + 1 ))
-        local END=\$(( (idx + 1) * CHUNK ))
-        if [[ \${END} -gt \${TOTAL_DATA} ]]; then END=\${TOTAL_DATA}; fi
-        if [[ \${START} -gt \${TOTAL_DATA} ]]; then
-            continue
-        fi
-        cp "\${HEADER_FILE}" "\${PREFIX}_\${idx}.tbl"
-        tail -n +\$((HEADER_LINES + 1)) "\${TABLE}" | sed -n "\${START},\${END}p" >> "\${PREFIX}_\${idx}.tbl"
-    done
-    rm -f "\${HEADER_FILE}"
-}
-
-# ── Stage 1: mImgtbl (metadata extraction — serial) ─────────────────────────
-echo ""
-echo "--- Stage 1: mImgtbl ---"
+# ── Stage 1: mImgtbl (serial) ────────────────────────────────────────────────
+echo ""; echo "--- Stage 1: mImgtbl ---"
 T1_START=\$(date +%s)
 srun --nodes=1 --ntasks=1 --nodelist="\${NODELIST[0]}" \
     mImgtbl "${RAW_DIR}" "\${WORK_DIR}/images.tbl"
-T1_END=\$(date +%s)
-T1=\$((T1_END - T1_START))
+T1_END=\$(date +%s); T1=\$((T1_END - T1_START))
 echo "mImgtbl time: \${T1}s"
 
-# ── Stage 2: mProjExec (reprojection — parallel across nodes) ───────────────
-echo ""
-echo "--- Stage 2: mProjExec (split across \${NUM_NODES} nodes) ---"
+# Build file list from images.tbl (data lines, last column = full path)
+mapfile -t IMG_FILES < <(awk '!/^[\\\\|]/' "\${WORK_DIR}/images.tbl" | awk '{print \$NF}')
+N_IMAGES=\${#IMG_FILES[@]}
+echo "Images to project: \${N_IMAGES}"
+
+# ── SSD stage-in 1: copy raw FITS to per-node SSD ────────────────────────────
+STAGEIN1_TIME=0
+if [[ \${NODE_LOCAL} -eq 1 ]]; then
+    echo ""; echo "--- Stage-in 1: raw FITS → per-node SSD ---"
+    T_SI1_START=\$(date +%s)
+    # Generate per-node copy scripts
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        echo "#!/bin/bash" > "\${WORK_DIR}/stagein1_node\${node_idx}.sh"
+    done
+    for i in \$(seq 0 \$((N_IMAGES-1))); do
+        node_idx=\$((i % NUM_NODES))
+        echo "cp \${IMG_FILES[\$i]} \${SSD_WORK}/raw_link/" >> "\${WORK_DIR}/stagein1_node\${node_idx}.sh"
+    done
+    PIDS=()
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        TARGET=\${NODELIST[\$node_idx]}
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET}" \
+            bash "\${WORK_DIR}/stagein1_node\${node_idx}.sh" &
+        PIDS+=(\$!)
+    done
+    for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+    T_SI1_END=\$(date +%s); STAGEIN1_TIME=\$((T_SI1_END - T_SI1_START))
+    echo "Stage-in 1 time: \${STAGEIN1_TIME}s"
+fi
+
+# ── Stage 2: mProject (parallel, one per image) ──────────────────────────────
+echo ""; echo "--- Stage 2: mProject (\${N_IMAGES} images across \${NUM_NODES} nodes) ---"
 T2_START=\$(date +%s)
 
-split_table "\${WORK_DIR}/images.tbl" \${NUM_NODES} "\${WORK_DIR}/images_chunk"
+# Generate per-node command scripts to avoid per-task srun overhead
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    SCRIPT="\${WORK_DIR}/mproject_node\${node_idx}.sh"
+    echo "#!/bin/bash" > "\${SCRIPT}"
+    chmod +x "\${SCRIPT}"
+done
 
+for i in \$(seq 0 \$((N_IMAGES-1))); do
+    node_idx=\$((i % NUM_NODES))
+    IN_FITS="\${IMG_FILES[\$i]}"
+    BASENAME=\$(basename "\${IN_FITS}")
+    OUT_FITS="hdu0_\${BASENAME}"
+    if [[ \${NODE_LOCAL} -eq 1 ]]; then
+        IN_PATH="\${SSD_WORK}/raw_link/\${BASENAME}"
+        OUT_PATH="\${SSD_WORK}/projected/\${OUT_FITS}"
+    else
+        IN_PATH="\${IN_FITS}"
+        OUT_PATH="\${PROJ_DIR}/\${OUT_FITS}"
+    fi
+    echo "mProject \${IN_PATH} \${OUT_PATH} ${HDR_FILE} > /dev/null 2>&1 &" >> "\${WORK_DIR}/mproject_node\${node_idx}.sh"
+done
+
+# Add wait at end of each script
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    echo "wait" >> "\${WORK_DIR}/mproject_node\${node_idx}.sh"
+done
+
+# Launch one srun per node, each running its batch of mProject calls
 PIDS=()
 for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
-    CHUNK_TBL="\${WORK_DIR}/images_chunk_\${node_idx}.tbl"
-    [[ -f "\${CHUNK_TBL}" ]] || continue
-    TARGET_NODE=\${NODELIST[\$node_idx]}
-    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
-        mProjExec -p "${RAW_DIR}" "\${CHUNK_TBL}" "${HDR_FILE}" "\${PROJ_DIR}" "\${WORK_DIR}/stats_\${node_idx}.tbl" \
-        > "${RESULTS_DIR}/mProjExec_\${node_idx}.log" 2>&1 &
+    TARGET=\${NODELIST[\$node_idx]}
+    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET}" \
+        bash "\${WORK_DIR}/mproject_node\${node_idx}.sh" &
     PIDS+=(\$!)
 done
-for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+PROJ_FAILED=0
+for pid in "\${PIDS[@]}"; do wait "\${pid}" || PROJ_FAILED=\$((PROJ_FAILED+1)); done
 
-T2_END=\$(date +%s)
-T2=\$((T2_END - T2_START))
-echo "mProjExec time: \${T2}s"
+T2_END=\$(date +%s); T2=\$((T2_END - T2_START))
+echo "mProject time: \${T2}s (failed=\${PROJ_FAILED})"
 
-# ── Stage 3: mImgtbl (projected catalog — serial) ────────────────────────────
-echo ""
-echo "--- Stage 3: mImgtbl (projected) ---"
+# ── SSD stage-out 1: projected FITS → BeeGFS ─────────────────────────────────
+STAGEOUT1_TIME=0
+if [[ \${NODE_LOCAL} -eq 1 ]]; then
+    echo "--- Stage-out 1: projected FITS per-node SSD → BeeGFS ---"
+    T_SO1_START=\$(date +%s)
+    PIDS=()
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        TARGET=\${NODELIST[\$node_idx]}
+        echo "#!/bin/bash
+cp \${SSD_WORK}/projected/*.fits \${PROJ_DIR}/ 2>/dev/null || true" > "\${WORK_DIR}/stageout1_node\${node_idx}.sh"
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET}" \
+            bash "\${WORK_DIR}/stageout1_node\${node_idx}.sh" &
+        PIDS+=(\$!)
+    done
+    for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+    T_SO1_END=\$(date +%s); STAGEOUT1_TIME=\$((T_SO1_END - T_SO1_START))
+    echo "Stage-out 1 time: \${STAGEOUT1_TIME}s"
+fi
+
+# ── Stage 3: mImgtbl projected (serial) ──────────────────────────────────────
+echo ""; echo "--- Stage 3: mImgtbl (projected) ---"
 T3_START=\$(date +%s)
 srun --nodes=1 --ntasks=1 --nodelist="\${NODELIST[0]}" \
     mImgtbl "\${PROJ_DIR}" "\${WORK_DIR}/proj_images.tbl"
-T3_END=\$(date +%s)
-T3=\$((T3_END - T3_START))
+T3_END=\$(date +%s); T3=\$((T3_END - T3_START))
 echo "mImgtbl(proj) time: \${T3}s"
 
-# ── Stage 4: mOverlaps (identify pairs — serial) ─────────────────────────────
-echo ""
-echo "--- Stage 4: mOverlaps ---"
+# ── Stage 4: mOverlaps (serial) ──────────────────────────────────────────────
+echo ""; echo "--- Stage 4: mOverlaps ---"
 T4_START=\$(date +%s)
 srun --nodes=1 --ntasks=1 --nodelist="\${NODELIST[0]}" \
     mOverlaps "\${WORK_DIR}/proj_images.tbl" "\${WORK_DIR}/diffs.tbl"
-T4_END=\$(date +%s)
-T4=\$((T4_END - T4_START))
-N_PAIRS=\$(wc -l < "\${WORK_DIR}/diffs.tbl" || echo "0")
+T4_END=\$(date +%s); T4=\$((T4_END - T4_START))
+N_PAIRS=\$(awk '!/^[\\\\|]/' "\${WORK_DIR}/diffs.tbl" | wc -l)
 echo "mOverlaps time: \${T4}s (\${N_PAIRS} pairs)"
 
-# ── Stage 5: mDiffExec (differencing — parallel across nodes) ────────────────
-echo ""
-echo "--- Stage 5: mDiffExec (split across \${NUM_NODES} nodes) ---"
+# ── Stage 5: mDiff (parallel, one per pair, batched per node) ─────────────────
+echo ""; echo "--- Stage 5: mDiff (\${N_PAIRS} pairs across \${NUM_NODES} nodes) ---"
 T5_START=\$(date +%s)
 
-split_table "\${WORK_DIR}/diffs.tbl" \${NUM_NODES} "\${WORK_DIR}/diffs_chunk"
+# Generate per-node mDiff scripts
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    echo "#!/bin/bash" > "\${WORK_DIR}/mdiff_node\${node_idx}.sh"
+done
+
+IDX=0
+while IFS= read -r line; do
+    PLUS=\$(echo "\${line}" | awk '{print \$3}')
+    MINUS=\$(echo "\${line}" | awk '{print \$4}')
+    DIFF_NAME=\$(echo "\${line}" | awk '{print \$5}')
+    node_idx=\$((IDX % NUM_NODES))
+    echo "mDiff \${PLUS} \${MINUS} \${DIFF_DIR}/\${DIFF_NAME} ${HDR_FILE} > /dev/null 2>&1 &" >> "\${WORK_DIR}/mdiff_node\${node_idx}.sh"
+    IDX=\$((IDX+1))
+done < <(awk '!/^[\\\\|]/' "\${WORK_DIR}/diffs.tbl")
+
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    echo "wait" >> "\${WORK_DIR}/mdiff_node\${node_idx}.sh"
+done
 
 PIDS=()
 for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
-    CHUNK_TBL="\${WORK_DIR}/diffs_chunk_\${node_idx}.tbl"
-    [[ -f "\${CHUNK_TBL}" ]] || continue
-    TARGET_NODE=\${NODELIST[\$node_idx]}
-    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
-        mDiffExec -p "\${PROJ_DIR}" "\${CHUNK_TBL}" "${HDR_FILE}" "\${DIFF_DIR}" \
-        > "${RESULTS_DIR}/mDiffExec_\${node_idx}.log" 2>&1 &
+    TARGET=\${NODELIST[\$node_idx]}
+    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET}" \
+        bash "\${WORK_DIR}/mdiff_node\${node_idx}.sh" &
     PIDS+=(\$!)
 done
 for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
 
-T5_END=\$(date +%s)
-T5=\$((T5_END - T5_START))
-echo "mDiffExec time: \${T5}s"
+T5_END=\$(date +%s); T5=\$((T5_END - T5_START))
+echo "mDiff time: \${T5}s"
 
-# ── Stage 6: mFitExec (plane fitting — parallel across nodes) ────────────────
-echo ""
-echo "--- Stage 6: mFitExec (split across \${NUM_NODES} nodes) ---"
+# ── Stage 6: mFitExec (serial, fast — mFitplane output is hard to reassemble) ─
+echo ""; echo "--- Stage 6: mFitExec ---"
 T6_START=\$(date +%s)
-
-split_table "\${WORK_DIR}/diffs.tbl" \${NUM_NODES} "\${WORK_DIR}/fits_chunk"
-
-PIDS=()
-for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
-    CHUNK_TBL="\${WORK_DIR}/fits_chunk_\${node_idx}.tbl"
-    [[ -f "\${CHUNK_TBL}" ]] || continue
-    TARGET_NODE=\${NODELIST[\$node_idx]}
-    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
-        mFitExec "\${CHUNK_TBL}" "\${WORK_DIR}/fits_\${node_idx}.tbl" "\${DIFF_DIR}" \
-        > "${RESULTS_DIR}/mFitExec_\${node_idx}.log" 2>&1 &
-    PIDS+=(\$!)
-done
-for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
-
-# Merge per-node fits tables (keep header from first, append data from rest)
-FIRST_FITS="\${WORK_DIR}/fits_0.tbl"
-if [[ -f "\${FIRST_FITS}" ]]; then
-    cp "\${FIRST_FITS}" "\${WORK_DIR}/fits.tbl"
-    for node_idx in \$(seq 1 \$((NUM_NODES-1))); do
-        FIT_TBL="\${WORK_DIR}/fits_\${node_idx}.tbl"
-        [[ -f "\${FIT_TBL}" ]] || continue
-        # Append data lines only (skip header lines starting with \ or |)
-        awk '!/^[\\\\|]/' "\${FIT_TBL}" >> "\${WORK_DIR}/fits.tbl" 2>/dev/null || true
-    done
-fi
-
-T6_END=\$(date +%s)
-T6=\$((T6_END - T6_START))
+srun --nodes=1 --ntasks=1 --nodelist="\${NODELIST[0]}" \
+    mFitExec "\${WORK_DIR}/diffs.tbl" "\${WORK_DIR}/fits.tbl" "\${DIFF_DIR}"
+T6_END=\$(date +%s); T6=\$((T6_END - T6_START))
 echo "mFitExec time: \${T6}s"
 
-# ── Stage 7: mBgModel (background modeling — serial) ─────────────────────────
-echo ""
-echo "--- Stage 7: mBgModel ---"
+# ── Stage 7: mBgModel (serial) ───────────────────────────────────────────────
+echo ""; echo "--- Stage 7: mBgModel ---"
 T7_START=\$(date +%s)
 srun --nodes=1 --ntasks=1 --nodelist="\${NODELIST[0]}" \
     mBgModel "\${WORK_DIR}/proj_images.tbl" "\${WORK_DIR}/fits.tbl" "\${WORK_DIR}/corrections.tbl"
-T7_END=\$(date +%s)
-T7=\$((T7_END - T7_START))
+T7_END=\$(date +%s); T7=\$((T7_END - T7_START))
 echo "mBgModel time: \${T7}s"
 
-# ── Stage 8: mBgExec (background correction — parallel across nodes) ─────────
-echo ""
-echo "--- Stage 8: mBgExec (split across \${NUM_NODES} nodes) ---"
+# ── SSD stage-in 2: projected FITS → per-node SSD for mBackground ────────────
+STAGEIN2_TIME=0
+if [[ \${NODE_LOCAL} -eq 1 ]]; then
+    echo ""; echo "--- Stage-in 2: projected FITS → per-node SSD ---"
+    T_SI2_START=\$(date +%s)
+    PIDS=()
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        TARGET=\${NODELIST[\$node_idx]}
+        echo "#!/bin/bash
+mkdir -p \${SSD_WORK}/corrected
+cp \${PROJ_DIR}/*.fits \${SSD_WORK}/projected/" > "\${WORK_DIR}/stagein2_node\${node_idx}.sh"
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET}" \
+            bash "\${WORK_DIR}/stagein2_node\${node_idx}.sh" &
+        PIDS+=(\$!)
+    done
+    for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+    T_SI2_END=\$(date +%s); STAGEIN2_TIME=\$((T_SI2_END - T_SI2_START))
+    echo "Stage-in 2 time: \${STAGEIN2_TIME}s"
+fi
+
+# ── Stage 8: mBackground (parallel, one per image, batched per node) ──────────
+echo ""; echo "--- Stage 8: mBackground across \${NUM_NODES} nodes ---"
 T8_START=\$(date +%s)
 
-split_table "\${WORK_DIR}/proj_images.tbl" \${NUM_NODES} "\${WORK_DIR}/bgexec_chunk"
+mapfile -t PROJ_FILES < <(awk '!/^[\\\\|]/' "\${WORK_DIR}/proj_images.tbl" | awk '{print \$NF}')
+N_PROJ=\${#PROJ_FILES[@]}
+echo "  Images to correct: \${N_PROJ}"
 
-# mBgExec needs matching rows in corrections.tbl. The corrections table uses
-# image IDs that correspond to proj_images.tbl rows. We split both tables
-# with the same chunk boundaries so rows align.
-split_table "\${WORK_DIR}/corrections.tbl" \${NUM_NODES} "\${WORK_DIR}/corrections_chunk"
+# Generate per-node mBackground scripts
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    echo "#!/bin/bash" > "\${WORK_DIR}/mbg_node\${node_idx}.sh"
+done
+
+for i in \$(seq 0 \$((N_PROJ-1))); do
+    node_idx=\$((i % NUM_NODES))
+    BASENAME=\$(basename "\${PROJ_FILES[\$i]}")
+    if [[ \${NODE_LOCAL} -eq 1 ]]; then
+        IN_PATH="\${SSD_WORK}/projected/\${BASENAME}"
+        OUT_PATH="\${SSD_WORK}/corrected/\${BASENAME}"
+    else
+        IN_PATH="\${PROJ_DIR}/\${BASENAME}"
+        OUT_PATH="\${CORR_DIR}/\${BASENAME}"
+    fi
+    echo "mBackground -t \${IN_PATH} \${OUT_PATH} \${WORK_DIR}/proj_images.tbl \${WORK_DIR}/corrections.tbl > /dev/null 2>&1 &" >> "\${WORK_DIR}/mbg_node\${node_idx}.sh"
+done
+
+for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+    echo "wait" >> "\${WORK_DIR}/mbg_node\${node_idx}.sh"
+done
 
 PIDS=()
 for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
-    IMG_CHUNK="\${WORK_DIR}/bgexec_chunk_\${node_idx}.tbl"
-    CORR_CHUNK="\${WORK_DIR}/corrections_chunk_\${node_idx}.tbl"
-    [[ -f "\${IMG_CHUNK}" ]] || continue
-    TARGET_NODE=\${NODELIST[\$node_idx]}
-    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
-        mBgExec -p "\${PROJ_DIR}" "\${IMG_CHUNK}" "\${CORR_CHUNK}" "\${CORR_DIR}" \
-        > "${RESULTS_DIR}/mBgExec_\${node_idx}.log" 2>&1 &
+    TARGET=\${NODELIST[\$node_idx]}
+    srun --nodes=1 --ntasks=1 --nodelist="\${TARGET}" \
+        bash "\${WORK_DIR}/mbg_node\${node_idx}.sh" &
     PIDS+=(\$!)
 done
-for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+BG_FAILED=0
+for pid in "\${PIDS[@]}"; do wait "\${pid}" || BG_FAILED=\$((BG_FAILED+1)); done
 
-T8_END=\$(date +%s)
-T8=\$((T8_END - T8_START))
-echo "mBgExec time: \${T8}s"
+T8_END=\$(date +%s); T8=\$((T8_END - T8_START))
+echo "mBackground time: \${T8}s (failed=\${BG_FAILED})"
 
-# ── Stage 9: mImgtbl (corrected catalog — serial) ────────────────────────────
-echo ""
-echo "--- Stage 9: mImgtbl (corrected) ---"
+# ── SSD stage-out 2: corrected FITS → BeeGFS ─────────────────────────────────
+STAGEOUT2_TIME=0
+if [[ \${NODE_LOCAL} -eq 1 ]]; then
+    echo "--- Stage-out 2: corrected FITS per-node SSD → BeeGFS ---"
+    T_SO2_START=\$(date +%s)
+    PIDS=()
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        TARGET=\${NODELIST[\$node_idx]}
+        echo "#!/bin/bash
+cp \${SSD_WORK}/corrected/*.fits \${CORR_DIR}/ 2>/dev/null || true" > "\${WORK_DIR}/stageout2_node\${node_idx}.sh"
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET}" \
+            bash "\${WORK_DIR}/stageout2_node\${node_idx}.sh" &
+        PIDS+=(\$!)
+    done
+    for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+    T_SO2_END=\$(date +%s); STAGEOUT2_TIME=\$((T_SO2_END - T_SO2_START))
+    echo "Stage-out 2 time: \${STAGEOUT2_TIME}s"
+fi
+
+# ── Stage 9: mImgtbl corrected (serial) ──────────────────────────────────────
+echo ""; echo "--- Stage 9: mImgtbl (corrected) ---"
 T9_START=\$(date +%s)
 srun --nodes=1 --ntasks=1 --nodelist="\${NODELIST[0]}" \
     mImgtbl "\${CORR_DIR}" "\${WORK_DIR}/corr_images.tbl"
-T9_END=\$(date +%s)
-T9=\$((T9_END - T9_START))
+T9_END=\$(date +%s); T9=\$((T9_END - T9_START))
 echo "mImgtbl(corr) time: \${T9}s"
 
-# ── Stage 10: mAdd (coaddition — serial) ─────────────────────────────────────
-echo ""
-echo "--- Stage 10: mAdd ---"
+# ── Stage 10: mAdd (serial) ──────────────────────────────────────────────────
+echo ""; echo "--- Stage 10: mAdd ---"
 T10_START=\$(date +%s)
 srun --nodes=1 --ntasks=1 --nodelist="\${NODELIST[0]}" \
     mAdd -p "\${CORR_DIR}" "\${WORK_DIR}/corr_images.tbl" "${HDR_FILE}" "\${WORK_DIR}/mosaic.fits"
-T10_END=\$(date +%s)
-T10=\$((T10_END - T10_START))
+T10_END=\$(date +%s); T10=\$((T10_END - T10_START))
 echo "mAdd time: \${T10}s"
 
 # ── Collect results ──────────────────────────────────────────────────────────
 T_TOTAL=\$((T10_END - T1_START))
-
 PROJ_SIZE=\$(du -sb "\${PROJ_DIR}" | cut -f1)
 DIFF_SIZE=\$(du -sb "\${DIFF_DIR}" | cut -f1)
 CORR_SIZE=\$(du -sb "\${CORR_DIR}" | cut -f1)
@@ -357,25 +404,31 @@ MOSAIC_SIZE=\$(stat --printf="%s" "\${WORK_DIR}/mosaic.fits" 2>/dev/null || echo
 TOTAL_INTERMEDIATE=\$((PROJ_SIZE + DIFF_SIZE + CORR_SIZE + MOSAIC_SIZE))
 
 STATUS="SUCCESS"
-if [[ ! -f "\${WORK_DIR}/mosaic.fits" ]]; then
-    STATUS="FAILED"
-fi
+if [[ ! -f "\${WORK_DIR}/mosaic.fits" ]]; then STATUS="FAILED"; fi
 
 {
 echo "RESULT: size=${SIZE}, backend=${STORAGE}, nodes=${NODES}"
 echo "mImgtbl_time_s=\${T1}"
-echo "mProjExec_time_s=\${T2}"
+echo "mProject_time_s=\${T2}"
+echo "mProject_failed=\${PROJ_FAILED}"
 echo "mImgtbl_proj_time_s=\${T3}"
 echo "mOverlaps_time_s=\${T4}"
-echo "mDiffExec_time_s=\${T5}"
+echo "mDiff_time_s=\${T5}"
 echo "mFitExec_time_s=\${T6}"
 echo "mBgModel_time_s=\${T7}"
-echo "mBgExec_time_s=\${T8}"
+echo "mBackground_time_s=\${T8}"
+echo "mBackground_failed=\${BG_FAILED}"
+echo "stagein1_time_s=\${STAGEIN1_TIME}"
+echo "stageout1_time_s=\${STAGEOUT1_TIME}"
+echo "stagein2_time_s=\${STAGEIN2_TIME}"
+echo "stageout2_time_s=\${STAGEOUT2_TIME}"
+echo "total_staging_time_s=\$((STAGEIN1_TIME + STAGEOUT1_TIME + STAGEIN2_TIME + STAGEOUT2_TIME))"
 echo "mImgtbl_corr_time_s=\${T9}"
 echo "mAdd_time_s=\${T10}"
 echo "total_time_s=\${T_TOTAL}"
 echo "n_images=${FITS_COUNT}"
 echo "n_pairs=\${N_PAIRS}"
+echo "tasks_per_node=${TASKS_PER_NODE}"
 echo "proj_bytes=\${PROJ_SIZE}"
 echo "diff_bytes=\${DIFF_SIZE}"
 echo "corr_bytes=\${CORR_SIZE}"
@@ -389,7 +442,6 @@ echo "multinode=true"
 echo ""
 echo "=== Results ==="
 cat "${RESULTS_DIR}/result.txt"
-echo ""
 echo "End: \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SLURM_EOF
 

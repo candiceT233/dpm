@@ -58,24 +58,65 @@ Luke (IIT co-author) directly recommended: "Add one more data-intensive workflow
 
 ## Data Source
 
+### Real 2MASS Data (used for pipeline validation)
+
 **Survey:** 2MASS J-band (Two Micron All Sky Survey, near-infrared)
 **Region:** Galactic plane near M17 (RA≈275.2°, Dec≈-16.17°) — dense stellar field with high image overlap
 **Download:** Montage's built-in `mArchiveDownload` from IRSA (https://irsa.ipac.caltech.edu)
 
-| Scale | Region Size | Images | Raw Data | Est. Intermediate | Est. Overlap Pairs |
-|---|---|---|---|---|---|
-| small | 2° | ~100 | ~0.4 GB | ~2 GB | ~250 |
-| medium | 4° | ~400 | ~1.8 GB | ~8 GB | ~1,000 |
-| large | 6° | ~1,425 | ~6.3 GB | ~28 GB | ~3,500 |
+| Scale | Region Size | Images | Dimensions | Raw Data | Intermediate | Overlap Pairs |
+|---|---|---|---|---|---|---|
+| small | 2° | 208 | 512×1024 | 0.3 GB | ~1 GB | ~1,022 |
+| medium | 4° | 733 | 512×1024 | 1.2 GB | ~3.8 GB | ~3,372 |
+| large | 6° | 1,425 | 512×1024 | 2.3 GB | ~7.4 GB | ~5,726 |
 
-The **large** configuration is the primary evaluation target. Small and medium are for validating the pipeline and for DPM ranking comparison across data sizes.
+### Synthetic Data (used for DPM I/O evaluation)
+
+Real 2MASS images are small (~1.5 MB each), producing only ~7 GB intermediate data at the
+largest scale — insufficient to stress storage tiers for DPM evaluation. Synthetic FITS
+images with larger pixel dimensions produce the same Montage I/O patterns (reprojection,
+differencing, background correction) at controllable data volumes.
+
+**Generation method:** 208 synthetic FITS files with valid WCS headers (RA-TAN/DEC-TAN
+gnomonic projection) placed in a 6° grid around M17 (RA=275.196°, Dec=-16.172°). Each
+image contains random Gaussian noise (mean=100, std=10) in float32 big-endian format per
+FITS standard. The WCS headers ensure proper overlap for Montage's pair detection.
+
+```bash
+# Generation command (from montage_dpm_evaluation/ directory):
+python3 scripts/generate_synthetic_fits.py --n-images 208 --size synth_small  # 2048×2048
+python3 scripts/generate_synthetic_fits.py --n-images 208 --size synth_medium # 4096×4096
+python3 scripts/generate_synthetic_fits.py --n-images 208 --size synth_large  # 8192×8192
+```
+
+| Scale | Images | Dimensions | Raw Data | Est. Intermediate | mProject time/image |
+|---|---|---|---|---|---|
+| synth_small | 208 | 2048×2048 | 3.2 GB | ~13 GB | ~24s |
+| synth_medium | 208 | 4096×4096 | 13.0 GB | ~50 GB | ~96s |
+| synth_large | 208 | 8192×8192 | 52.0 GB | ~200 GB | ~6 min |
+
+**Why synthetic data is valid for DPM evaluation:** DPM evaluates I/O performance, not
+scientific correctness. Synthetic images produce identical Montage I/O patterns (same file
+formats, same pipeline stages, same parallel task counts) as real data. The pixel values
+(random noise vs real astronomical signal) do not affect file sizes, read/write patterns,
+or storage tier performance. Montage processes each FITS image identically regardless of
+content.
+
+**Fixed parallelism:** All synthetic datasets use 208 images to maintain consistent task
+counts across scales. This isolates the I/O volume variable — the number of parallel
+mProject/mBackground tasks is always 208, only the per-task data size changes.
+
+The **synth_large** configuration (208 images × 8192×8192 × 4 bytes = 52 GB raw, ~200 GB
+intermediate) is the primary DPM evaluation target, comparable to WfBench's data volumes.
 
 ## Experiment Scope
 
-- **Configurations:** 9 (3 storage × 3 node counts) for the large dataset
-- **Repetitions:** 3 runs per configuration for statistical significance
-- **Total jobs:** 27 (minimum viable) + optional small/medium validation
-- **Cluster:** Same 96-node cluster as existing evaluations (dual AMD EPYC 7502, 384 GB RAM)
+- **Data:** synth_medium (208 synthetic FITS @ 4096×4096, 13 GB raw, ~130 GB total I/O)
+- **Storage backends:** BeeGFS (shared), local NVMe SSD (node-local with staging), tmpfs (RAM-backed, node-local with staging)
+- **Node scales:** 4, 8, 16 nodes (fixed 208 images, varying parallelism per node)
+- **Task distribution:** Individual mProject/mDiff/mBackground calls via srun, 64 tasks/node
+- **Configurations:** 9 (3 storage × 3 node counts), fixed data size
+- **Cluster:** PNNL Deception (64-core AMD, 251 GB RAM, BeeGFS + 477 GB NVMe SSD per node)
 
 ## Producer-Consumer Structure for DPM
 
@@ -83,11 +124,55 @@ Montage's 10-stage pipeline maps to 5 producer-consumer pairs for DPM analysis:
 
 | Pair | Producer Stage | Consumer Stage | Data Flow |
 |---|---|---|---|
-| 1 | mProjExec (reprojection) | mDiffExec (differencing) | Projected FITS → read pairs for overlap computation |
-| 2 | mDiffExec (differencing) | mFitExec (plane fitting) | Difference FITS → statistical fitting |
-| 3 | mFitExec → mBgModel (modeling) | mBgExec (correction) | Correction params → apply to projected images |
-| 4 | mProjExec (reprojection) | mBgExec (correction) | Projected FITS → background-corrected FITS |
-| 5 | mBgExec (correction) | mAdd (coaddition) | Corrected FITS → final mosaic |
+| 1 | mProject (reprojection) | mDiff (differencing) | Projected FITS → read pairs for overlap computation |
+| 2 | mDiff (differencing) | mFitExec (plane fitting) | Difference FITS → statistical fitting |
+| 3 | mFitExec → mBgModel (modeling) | mBackground (correction) | Correction params → apply to projected images |
+| 4 | mProject (reprojection) | mBackground (correction) | Projected FITS → background-corrected FITS |
+| 5 | mBackground (correction) | mAdd (coaddition) | Corrected FITS → final mosaic |
+
+## I/O Volume Analysis
+
+**Important:** The "intermediate data size" reported in results (`total_intermediate_bytes`)
+is the **peak on-disk footprint** — the sum of all intermediate files that exist on storage
+simultaneously. The **total I/O volume** (all reads + writes) is significantly larger because
+each file is written once and then read one or more times by downstream stages.
+
+### Per-stage I/O breakdown (N = number of images, P = number of overlap pairs)
+
+| Stage | Writes | Reads | Notes |
+|---|---|---|---|
+| mProject | N projected FITS (1× each) | N raw FITS (1× each) | Heaviest compute + I/O stage |
+| mDiff | P diff FITS (1× each) | 2P projected reads (each pair reads 2 images) | Read amplification: 2× |
+| mFitExec | 1 fits.tbl | P diff FITS (1× each) | Light I/O |
+| mBgModel | 1 corrections.tbl | fits.tbl + proj_images.tbl | Negligible I/O |
+| mBackground | N corrected FITS (1× each) | N projected FITS (1× each) + corrections.tbl | Projected FITS read a 2nd time |
+| mAdd | 1 mosaic FITS | N corrected FITS (1× each) | Serial, read-heavy |
+
+### Read amplification
+
+Projected FITS files are **read 3 times total**:
+1. By mDiff (2 reads per pair, but each image appears in multiple pairs)
+2. By mBackground (1 read per image)
+
+For 208 images with ~1022 pairs, each projected image appears in ~10 pairs on average,
+so mDiff reads ~2044 projected files total (10× the file count).
+
+### Estimated total I/O volume by dataset
+
+| Dataset | Peak on-disk | Total writes | Total reads | **Total I/O** | Amplification |
+|---|---|---|---|---|---|
+| real small (512×1024) | 1.0 GB | ~1.0 GB | ~1.6 GB | **~2.6 GB** | 2.6× |
+| synth_small (2048²) | ~13 GB | ~13 GB | ~21 GB | **~34 GB** | 2.6× |
+| synth_medium (4096²) | ~50 GB | ~50 GB | ~80 GB | **~130 GB** | 2.6× |
+| synth_large (8192²) | ~200 GB | ~200 GB | ~320 GB | **~520 GB** | 2.6× |
+
+The ~2.6× amplification factor comes from the DAG structure: data flows through multiple
+stages with fan-out at the differencing step. This is characteristic of image mosaicking
+workflows and distinct from the linear pipeline pattern in WfBench.
+
+**For DPM evaluation:** The total I/O volume (~130 GB for synth_medium) is what determines
+storage tier impact. The read amplification means storage read bandwidth is tested more
+heavily than write bandwidth, unlike WfBench which has balanced read/write.
 
 ## Paper Placement
 

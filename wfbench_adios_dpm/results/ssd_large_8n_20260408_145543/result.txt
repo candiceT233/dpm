@@ -1,0 +1,10 @@
+RESULT: size=large, backend=ssd, nodes=8
+stage1_time_s=1351
+stage2_time_s=152
+stage3_time_s=0
+total_time_s=1503
+failed_tasks=25
+status=FAILED
+ior_used=1
+nodelist=dc146 dc147 dc148 dc149 dc150 dc155 dc156 dc157
+multinode=true

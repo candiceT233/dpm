@@ -136,9 +136,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Helper: get target node for task i
-node_for_task() {
+# Helper: get target node for task i (Stage 1 placement)
+node_for_task_s1() {
     echo "\${NODELIST[\$(( \$1 / ${TASKS_PER_NODE} ))]}"
+}
+# Stage 2 placement: shift by 1 node for cross-node data movement
+node_for_task_s2() {
+    echo "\${NODELIST[\$(( (\$1 / ${TASKS_PER_NODE} + 1) % NUM_NODES ))]}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,7 +154,7 @@ T_STAGE1_START=\$(date +%s)
 
 PIDS=()
 for i in \$(seq 0 $((N_TASKS-1))); do
-    TARGET_NODE=\$(node_for_task \${i})
+    TARGET_NODE=\$(node_for_task_s1 \${i})
     OUT_FILE="\${WORK_DIR}/sim_out_\${i}.bin"
     (
     echo "[task \${i}] node=\${TARGET_NODE}"
@@ -172,15 +176,63 @@ STAGE1_TIME=\$((T_STAGE1_END - T_STAGE1_START))
 echo "Stage 1 time: \${STAGE1_TIME}s (${N_TASKS} tasks, failed=\${STAGE1_FAILED})"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Staging 1→2: scp data from Stage 1 nodes to Stage 2 nodes (node-local only)
+# For BeeGFS: no staging needed (shared filesystem)
+# ─────────────────────────────────────────────────────────────────────────────
+STAGING_12_TIME=0
+if [[ \${NODE_LOCAL} -eq 1 ]]; then
+    echo "=== Staging 1→2: scp from Stage 1 nodes → Stage 2 nodes ==="
+    T_STG12_START=\$(date +%s)
+
+    # Generate per-source-node scp scripts
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        echo "#!/bin/bash" > "\${BEEGFS_AGG}/scp_s12_node\${node_idx}.sh"
+    done
+
+    for i in \$(seq 0 $((N_TASKS-1))); do
+        SRC_NODE=\$(node_for_task_s1 \${i})
+        DST_NODE=\$(node_for_task_s2 \${i})
+        src_node_idx=\$(( i / ${TASKS_PER_NODE} ))
+        SRC_FILE="\${WORK_DIR}/sim_out_\${i}.bin"
+        if [[ \${USE_IOR} -eq 1 ]]; then
+            SRC_FILE="\${SRC_FILE}.00000000"
+        fi
+        # scp from this node to the destination node
+        echo "scp -o StrictHostKeyChecking=no \${SRC_FILE} \${DST_NODE}:\${SRC_FILE} 2>/dev/null &" >> "\${BEEGFS_AGG}/scp_s12_node\${src_node_idx}.sh"
+    done
+
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        echo "wait" >> "\${BEEGFS_AGG}/scp_s12_node\${node_idx}.sh"
+    done
+
+    PIDS=()
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        TARGET=\${NODELIST[\$node_idx]}
+        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET}" \
+            bash "\${BEEGFS_AGG}/scp_s12_node\${node_idx}.sh" &
+        PIDS+=(\$!)
+    done
+    for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+
+    T_STG12_END=\$(date +%s)
+    STAGING_12_TIME=\$((T_STG12_END - T_STG12_START))
+    echo "Staging 1→2 time: \${STAGING_12_TIME}s (scp ${N_TASKS} files across nodes)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Stage 2: N parallel analysis tasks — seq read 1MB + seq write 1MB
-# Each task pinned to its assigned node via srun
+# For node-local: tasks run on Stage 2 nodes (shifted from Stage 1)
 # ─────────────────────────────────────────────────────────────────────────────
 echo "=== Stage 2: Analysis tasks (seq read 1MB + seq write 1MB) ==="
 T_STAGE2_START=\$(date +%s)
 
 PIDS=()
 for i in \$(seq 0 $((N_TASKS-1))); do
-    TARGET_NODE=\$(node_for_task \${i})
+    if [[ \${NODE_LOCAL} -eq 1 ]]; then
+        TARGET_NODE=\$(node_for_task_s2 \${i})
+    else
+        TARGET_NODE=\$(node_for_task_s1 \${i})
+    fi
     IN_FILE="\${WORK_DIR}/sim_out_\${i}.bin"
     OUT_FILE="\${WORK_DIR}/analysis_out_\${i}.bin"
     (
@@ -205,29 +257,56 @@ STAGE2_TIME=\$((T_STAGE2_END - T_STAGE2_START))
 echo "Stage 2 time: \${STAGE2_TIME}s (failed=\${STAGE2_FAILED})"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 3: Aggregate — for node-local storage, gather partials via BeeGFS
+# Staging 2→3: scp analysis outputs to aggregation node (node-local only)
+# ─────────────────────────────────────────────────────────────────────────────
+STAGING_23_TIME=0
+if [[ \${NODE_LOCAL} -eq 1 ]]; then
+    echo "=== Staging 2→3: scp analysis outputs → aggregation node ==="
+    T_STG23_START=\$(date +%s)
+    AGG_NODE=\${NODELIST[0]}
+    AGG_DIR="\${WORK_DIR}/aggregate_in"
+    srun --nodes=1 --ntasks=1 --nodelist="\${AGG_NODE}" mkdir -p "\${AGG_DIR}"
+
+    # Each Stage 2 node scp's its outputs to the aggregation node
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        S2_NODE_IDX=\$(( (node_idx + 1) % NUM_NODES ))
+        S2_NODE=\${NODELIST[\$S2_NODE_IDX]}
+        FIRST=\$((node_idx * ${TASKS_PER_NODE}))
+        LAST=\$((FIRST + ${TASKS_PER_NODE} - 1))
+        SCRIPT="\${BEEGFS_AGG}/scp_s23_node\${S2_NODE_IDX}.sh"
+        echo "#!/bin/bash" > "\${SCRIPT}"
+        for t in \$(seq \${FIRST} \${LAST}); do
+            echo "scp -o StrictHostKeyChecking=no \${WORK_DIR}/analysis_out_\${t}.bin* \${AGG_NODE}:\${AGG_DIR}/ 2>/dev/null &" >> "\${SCRIPT}"
+        done
+        echo "wait" >> "\${SCRIPT}"
+    done
+
+    PIDS=()
+    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
+        S2_NODE_IDX=\$(( (node_idx + 1) % NUM_NODES ))
+        S2_NODE=\${NODELIST[\$S2_NODE_IDX]}
+        srun --nodes=1 --ntasks=1 --nodelist="\${S2_NODE}" \
+            bash "\${BEEGFS_AGG}/scp_s23_node\${S2_NODE_IDX}.sh" &
+        PIDS+=(\$!)
+    done
+    for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
+
+    T_STG23_END=\$(date +%s)
+    STAGING_23_TIME=\$((T_STG23_END - T_STG23_START))
+    echo "Staging 2→3 time: \${STAGING_23_TIME}s (scp to aggregation node \${AGG_NODE})"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3: Aggregate
 # ─────────────────────────────────────────────────────────────────────────────
 echo "=== Stage 3: Aggregation (sequential read + write) ==="
 T_STAGE3_START=\$(date +%s)
 
 if [[ \${NODE_LOCAL} -eq 1 ]]; then
-    # Phase A: each node concatenates its local analysis outputs to BeeGFS
-    PIDS=()
-    for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
-        TARGET_NODE=\${NODELIST[\$node_idx]}
-        FIRST=\$((node_idx * ${TASKS_PER_NODE}))
-        LAST=\$((FIRST + ${TASKS_PER_NODE} - 1))
-        FILE_LIST=""
-        for t in \$(seq \${FIRST} \${LAST}); do
-            FILE_LIST="\${FILE_LIST} \${WORK_DIR}/analysis_out_\${t}.bin*"
-        done
-        srun --nodes=1 --ntasks=1 --nodelist="\${TARGET_NODE}" \
-            bash -c "cat \${FILE_LIST} > \${BEEGFS_AGG}/partial_\${node_idx}.bin" &
-        PIDS+=(\$!)
-    done
-    for pid in "\${PIDS[@]}"; do wait "\${pid}" || true; done
-    # Phase B: combine partials on batch node
-    cat "\${BEEGFS_AGG}"/partial_*.bin > "\${BEEGFS_AGG}/aggregate_out.bin" 2>&1 || true
+    # Aggregation node has all files in AGG_DIR
+    AGG_NODE=\${NODELIST[0]}
+    srun --nodes=1 --ntasks=1 --nodelist="\${AGG_NODE}" \
+        bash -c "cat \${WORK_DIR}/aggregate_in/analysis_out_*.bin* > \${WORK_DIR}/aggregate_out.bin 2>/dev/null || true"
 else
     cat "\${WORK_DIR}"/analysis_out_*.bin* > "\${WORK_DIR}/aggregate_out.bin" 2>&1 || true
 fi
@@ -243,8 +322,11 @@ STATUS=\$([ \${TOTAL_FAILED} -eq 0 ] && echo "SUCCESS" || echo "FAILED")
 {
 echo "RESULT: size=${SIZE}, backend=${STORAGE}, nodes=${NODES}"
 echo "stage1_time_s=\${STAGE1_TIME}"
+echo "staging_12_time_s=\${STAGING_12_TIME}"
 echo "stage2_time_s=\${STAGE2_TIME}"
+echo "staging_23_time_s=\${STAGING_23_TIME}"
 echo "stage3_time_s=\${STAGE3_TIME}"
+echo "total_staging_time_s=\$((STAGING_12_TIME + STAGING_23_TIME))"
 echo "total_time_s=\${T_TOTAL}"
 echo "failed_tasks=\${TOTAL_FAILED}"
 echo "status=\${STATUS}"

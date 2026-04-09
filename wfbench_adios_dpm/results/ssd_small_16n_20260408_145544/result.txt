@@ -1,0 +1,10 @@
+RESULT: size=small, backend=ssd, nodes=16
+stage1_time_s=38
+stage2_time_s=9
+stage3_time_s=267
+total_time_s=314
+failed_tasks=0
+status=SUCCESS
+ior_used=1
+nodelist=dc241 dc247 dc255 dc256 dc257 dc258 dc259 dc260 dc261 dc262 dc263 dc264 dc265 dc266 dc267 dc268
+multinode=true
