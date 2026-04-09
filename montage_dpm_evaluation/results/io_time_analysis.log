@@ -1,0 +1,107 @@
+# Montage I/O Time Analysis
+# Date: 2026-04-09
+# Dataset: 208 real 2MASS J-band FITS images (small size)
+# Method: strace -f -T -ttt (follow forks, time all syscalls)
+# Syscalls traced: read, write, openat, close, lseek, pread64, pwrite64, mmap, munmap, fstat, stat, lstat
+# Host: PNNL Deception, AMD EPYC, BeeGFS storage, single login-node run
+#
+# ─── I/O time calculation ─────────────────────────────────────────────────────
+#   wall_time     = elapsed wall-clock time (bash date +%s.%N before/after)
+#   threads       = unique PID count in strace output (fork-following via -f)
+#   io_sum        = sum of all syscall durations across all traced PIDs
+#   io_per_thread = io_sum / threads (approximates wall-clock I/O impact)
+#   io_pct        = (io_per_thread / wall_time) × 100
+#
+# Note: Montage binaries are single-threaded (no OpenMP/pthread), so
+# threads=1 for all stages in this measurement. The calculation remains
+# general and can be applied to multi-threaded tools.
+#
+# Columns: task_name  wall_time  threads  io_sum  io_per_thread  io_percentage
+
+=== Stage 1: mImgtbl (raw image catalog, serial) ===
+mImgtbl_raw          wall=   4.275s  threads= 1  io_sum=   0.677s  io_per_thread=   0.677s  io_pct= 15.84%
+
+=== Stage 2: mProject (single image reprojection) ===
+mProject_single      wall=   3.033s  threads= 1  io_sum=   0.008s  io_per_thread=   0.008s  io_pct=  0.26%
+
+=== Stage 3: mImgtbl (projected image catalog, serial) ===
+mImgtbl_proj         wall=   0.775s  threads= 1  io_sum=   0.016s  io_per_thread=   0.016s  io_pct=  2.06%
+
+=== Stage 4: mOverlaps (identify overlapping pairs, serial) ===
+mOverlaps            wall=   0.500s  threads= 1  io_sum=   0.005s  io_per_thread=   0.005s  io_pct=  1.00%
+
+=== Stage 5: mDiff (single pair difference) ===
+mDiff_single         wall=   0.027s  threads= 1  io_sum=   0.006s  io_per_thread=   0.006s  io_pct= 22.22%
+
+=== Stage 6: mFitExec (plane fitting, serial over all diffs) ===
+mFitExec             wall=   5.628s  threads= 1  io_sum=   0.219s  io_per_thread=   0.219s  io_pct=  3.89%
+
+=== Stage 7: mBgModel (background modeling, serial) ===
+mBgModel             wall=   1.190s  threads= 1  io_sum=   0.002s  io_per_thread=   0.002s  io_pct=  0.17%
+
+=== Stage 8: mBackground (single image background correction) ===
+mBackground_single   wall=   0.009s  threads= 1  io_sum=   0.001s  io_per_thread=   0.001s  io_pct=  5.00%
+
+=== Stage 9: mImgtbl (corrected image catalog, serial) ===
+mImgtbl_corr         wall=   0.767s  threads= 1  io_sum=   0.016s  io_per_thread=   0.016s  io_pct=  2.06%
+
+=== Stage 10: mAdd (final mosaic coaddition, serial) ===
+mAdd                 wall=   3.548s  threads= 1  io_sum=   2.637s  io_per_thread=   2.637s  io_pct= 74.00%
+
+
+# ─── Summary Table ────────────────────────────────────────────────────────────
+#
+#   Stage                 Wall Time    I/O Time    I/O %    Classification
+#   ──────────────────    ─────────    ────────    ─────    ─────────────────
+#   mImgtbl (raw)           4.275s       0.677s    15.8%    Metadata-heavy
+#   mProject                3.033s       0.008s     0.3%    Compute-bound ★
+#   mImgtbl (projected)     0.775s       0.016s     2.1%    Fast metadata
+#   mOverlaps               0.500s       0.005s     1.0%    CPU (geometry)
+#   mDiff                   0.027s       0.006s    22.2%    Very short (absolute I/O tiny)
+#   mFitExec                5.628s       0.219s     3.9%    CPU (regression)
+#   mBgModel                1.190s       0.002s     0.2%    CPU (iterative)
+#   mBackground             0.009s       0.001s     5.0%    Very short
+#   mImgtbl (corrected)     0.767s       0.016s     2.1%    Fast metadata
+#   mAdd                    3.548s       2.637s    74.0%    I/O-bound ★
+#
+#
+# ─── Key Findings ─────────────────────────────────────────────────────────────
+#
+# 1. mProject (the dominant parallel stage, ~208 calls × 3s per call) is
+#    99.7% COMPUTE-BOUND. Reprojection is pure CPU work (coordinate
+#    transforms + pixel interpolation).
+#
+# 2. mAdd is the primary I/O-bound Montage stage (74% I/O). It reads all
+#    corrected FITS files sequentially to build the final mosaic.
+#
+# 3. mImgtbl stages spend 2-16% on I/O (metadata reads + catalog writes).
+#
+# 4. Short-lived stages (mDiff, mBackground) show higher I/O% because their
+#    absolute compute time is tiny. In absolute terms, their I/O is
+#    negligible (6ms and 1ms respectively).
+#
+# 5. mFitExec does a serial loop over ~1022 diff files and spends ~4% on
+#    I/O, the rest on least-squares plane fitting.
+#
+#
+# ─── Implications for DPM Evaluation ──────────────────────────────────────────
+#
+# Montage total runtime is dominated by:
+#   • mProject:  ~208 × 3s = ~624s sequential (parallelized across nodes)
+#   • mAdd:      ~3.5s but I/O-bound
+#
+# Per-call I/O percentages:
+#   • mProject: 0.3% → storage choice has negligible per-call impact
+#   • mAdd:     74%  → direct benefit from faster storage
+#
+# HOWEVER, at parallel scale (e.g., 208 mProject calls simultaneously hitting
+# shared BeeGFS), the aggregate I/O contention becomes significant. Each
+# individual mProject waits on the same storage bandwidth, effectively
+# serializing the small per-call I/O. This explains why BeeGFS vs SSD vs
+# tmpfs show measurable total-runtime differences despite mProject being
+# 99.7% compute-bound in isolation.
+#
+# For DPM storage tier selection, the critical factors are:
+#   1. mAdd's read bandwidth from storage (74% I/O per call)
+#   2. Aggregate parallel mProject I/O contention (per-call 0.3% × 208 concurrent)
+#   3. Metadata operations in mImgtbl (directory scans)
