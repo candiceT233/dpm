@@ -1,0 +1,45 @@
+{
+    "sim": {
+        "stage_order": 0,
+        "parallelism": 16,
+        "num_tasks": 16,
+        "predecessors": {
+            "initial_data": {
+                "inputs": []
+            }
+        },
+        "outputs": [
+            "sim_out_\\d+\\.bin"
+        ]
+    },
+    "analysis": {
+        "stage_order": 1,
+        "parallelism": 16,
+        "num_tasks": 16,
+        "predecessors": {
+            "sim": {
+                "inputs": [
+                    "sim_out_\\d+\\.bin"
+                ]
+            }
+        },
+        "outputs": [
+            "analysis_out_\\d+\\.bin"
+        ]
+    },
+    "aggregate": {
+        "stage_order": 2,
+        "parallelism": 1,
+        "num_tasks": 1,
+        "predecessors": {
+            "analysis": {
+                "inputs": [
+                    "analysis_out_\\d+\\.bin"
+                ]
+            }
+        },
+        "outputs": [
+            "aggregate_out\\.bin"
+        ]
+    }
+}

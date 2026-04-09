@@ -106,6 +106,27 @@ TEST_CONFIGS = {
     #     "exp_data_path": "./llm",
     #     "test_folders": ['llm_wf_2s']
     # },
+    "wfbench_small": {
+        "SCRIPT_ORDER": "wfbench_script_order",
+        "NUM_NODES_LIST": [8, 16],
+        "ALLOWED_PARALLELISM": [1, 2, 8, 16],
+        "exp_data_path": "./wfbench",
+        "test_folders": ['wfbench_small']
+    },
+    "wfbench_medium": {
+        "SCRIPT_ORDER": "wfbench_script_order",
+        "NUM_NODES_LIST": [8, 16],
+        "ALLOWED_PARALLELISM": [1, 2, 8, 16],
+        "exp_data_path": "./wfbench",
+        "test_folders": ['wfbench_medium']
+    },
+    "wfbench_large": {
+        "SCRIPT_ORDER": "wfbench_script_order",
+        "NUM_NODES_LIST": [8, 16],
+        "ALLOWED_PARALLELISM": [1, 2, 8, 16],
+        "exp_data_path": "./wfbench",
+        "test_folders": ['wfbench_large']
+    },
     "template_workflow": {
         "SCRIPT_ORDER": "template_script_order",
         "NUM_NODES_LIST": [1],
