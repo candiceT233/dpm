@@ -44,7 +44,7 @@
 | 640703 | adios_large_8n | 7813s | 1158s | **8971s (2:29:31)** | SUCCESS |
 | 640705 | adios_small_16n | 194s | 85s | **279s (4:39)** | FAILED (2/32) |
 | 640707 | adios_medium_16n | 1621s | 569s | **2190s (36:30)** | SUCCESS |
-| 640709 | adios_large_16n | running |
+| 640709 | adios_large_16n | 7801s | 2516s | **10317s (2:51:57)** | SUCCESS |
 
 ## Completed — WfBench tmpfs w/ scp staging
 
