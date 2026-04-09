@@ -26,12 +26,22 @@
 | 639324 | beegfs_small_16n | 5:03 |
 | 639326 | beegfs_medium_16n | 33:57 |
 
-## Completed — ADIOS SST fair (no computation, BP5 output + ADIOS aggregation)
+## ADIOS SST — previous results INVALIDATED
 
-| Job ID | Config | Stage 1+2 | Stage 3 | Total | Status |
-|--------|--------|-----------|---------|-------|--------|
-| 640636 | adios_small_8n | 265s | 541s | **806s (13:26)** | SUCCESS |
-| 640642 | adios_small_16n | 262s | 950s | **1212s (20:21)** | SUCCESS |
+- v1 (639366–639376): had numpy computation, no Stage 3, 2x task allocation
+- v2 (640636–640646): no computation but wrote ALL data (8x more I/O than file-based)
+- All archived. See FAIRNESS_FIX_NOTES.md for details.
+
+## Running — ADIOS SST v3 (fair: 1/8 reduction, BP5 output, 4h limit)
+
+| Job ID | Config | Status |
+|--------|--------|--------|
+| 640699 | adios_small_8n | running |
+| 640701 | adios_medium_8n | running |
+| 640703 | adios_large_8n | running |
+| 640705 | adios_small_16n | running |
+| 640707 | adios_medium_16n | running |
+| 640709 | adios_large_16n | running |
 
 ## Completed — WfBench tmpfs w/ scp staging
 
@@ -40,6 +50,16 @@
 | 640652 | tmpfs_small_8n | 9s | 258s | 11s | 222s | **515s** | SUCCESS (scp=93%) |
 | 640656 | tmpfs_medium_8n | 46s | 10s | 0s | 17s | 73s | **FAILED** (24/32 — tmpfs OOM) |
 | 640660 | tmpfs_large_8n | 53s | 9s | 1s | 14s | 77s | **FAILED** (32/32 — tmpfs OOM) |
+| 640664 | tmpfs_small_16n | — | 254s | — | 374s | **715s** | SUCCESS (scp=88%) |
+| 640668 | tmpfs_medium_16n | — | 9s | — | 24s | 84s | **FAILED** (48/64 — tmpfs OOM) |
+| 640672 | tmpfs_large_16n | — | 9s | — | 26s | 89s | **FAILED** (64/64 — tmpfs OOM) |
+
+## Completed — WfBench SSD w/ scp staging
+
+| Job ID | Config | Stage1 | scp 1→2 | Stage2 | scp 2→3 | Total | Status |
+|--------|--------|--------|---------|--------|---------|-------|--------|
+| 640650 | ssd_small_8n | 27s | 295s | 3s | 222s | **585s** | SUCCESS (scp=88%) |
+| 640662 | ssd_small_16n | — | 250s | — | 379s | **716s** | SUCCESS (scp=88%) |
 
 ## Completed — Montage synth_small
 

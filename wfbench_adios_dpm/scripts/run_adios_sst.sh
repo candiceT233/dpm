@@ -129,6 +129,7 @@ done
 python3 ${ROOT_DIR}/adios/consumer_task.py \\
     --input-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \\
     --output-path "${BEEGFS_PATH}/analysis_out_\${SLURM_JOB_ID}_\${i}.bp" \\
+    --reduction-ratio 8 \\
     > "${RESULTS_DIR}/consumer_\${i}.log" 2>&1 &
 CONS_PID_\${i}=\\\$!
 

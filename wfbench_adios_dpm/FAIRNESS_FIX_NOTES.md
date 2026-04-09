@@ -80,6 +80,19 @@ The `finally` block references an undefined variable `outfile`. This is leftover
 
 The consumer only uses ADIOS `writer`, not a raw file handle. The `reader.close()` and `writer.close()` in the finally block are sufficient.
 
+## Fix Applied (2026-04-08)
+
+All suggested fixes implemented:
+1. `consumer_task.py`: added `--reduction-ratio` arg (default 8), writes every Nth step only
+2. `run_adios_sst.sh`: passes `--reduction-ratio 8` to consumer
+3. Removed stale `outfile` references from finally block
+4. Time limit increased from 2h to 4h
+
+### Fix history
+- **v1** (jobs 639366–639376): had numpy computation, no Stage 3, 2x task allocation → invalidated
+- **v2** (jobs 640636–640646): removed computation but wrote ALL data (8x more) → invalidated
+- **v3** (jobs 640699–640709): 1/8 reduction ratio, BP5 output, ADIOS aggregation, 4h limit → **current**
+
 ## Verification After Fix
 
 After fixing and re-running, verify:
@@ -87,6 +100,8 @@ After fixing and re-running, verify:
 2. BP5 output files should be ~1/8 the size of the SST stream
 3. Stage 3 aggregation should process ~1/8 the data, running proportionally faster
 4. The total ADIOS SST time should decrease significantly
+
+**Status:** v3 jobs running (640699–640709). Results pending.
 
 ## What IS Fair (no changes needed)
 

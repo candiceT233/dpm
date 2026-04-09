@@ -2,18 +2,16 @@
 """
 ADIOS2 SST consumer task for the WfBench ADIOS vs DPM experiment.
 
-This simulates Stage 2 (analysis) of the synthetic workflow, reading
-producer output via ADIOS2's SST engine and writing reduced output to a file.
+Reads producer output via ADIOS2 SST engine and writes reduced output
+to BP5 file. Writes only 1/N steps to match the data reduction in the
+file-based Stage 2 (IOR reads/writes stage2FileSizeBytes = stage1 * 0.125).
 
 Usage:
     python consumer_task.py \
         --input-name sim_out_0 \
         --output-path /path/to/storage/analysis_out_0.bp \
+        --reduction-ratio 8 \
         --adios-config ../adios/adios2.xml
-
-Failure modes captured:
-    - SST OpenTimeoutSecs exceeded: producer not running → exit code 1
-    - MemoryError / OOM kill: data too large → logged to results/
 """
 
 import adios2
@@ -23,8 +21,11 @@ import os
 import sys
 import time
 
-def run_consumer(input_name: str, output_path: str, adios_config: str):
-    print(f"[consumer] input={input_name}, output={output_path}")
+
+def run_consumer(input_name: str, output_path: str, adios_config: str,
+                 reduction_ratio: int = 8):
+    print(f"[consumer] input={input_name}, output={output_path}, "
+          f"reduction=1/{reduction_ratio}")
 
     adios_obj = adios2.Adios(adios_config)
     io_in  = adios_obj.declare_io("SST_reader")
@@ -62,14 +63,15 @@ def run_consumer(input_name: str, output_path: str, adios_config: str):
             reader.get(var_in, buf)
             reader.end_step()
 
-            # Write received data to BP5 output (ADIOS native, no computation)
-            writer.begin_step()
-            writer.put(var_out, buf)
-            writer.end_step()
-            bytes_written += buf.nbytes
-
             steps_read += 1
             bytes_read += buf.nbytes
+
+            # Write only every Nth step to match file-based data reduction
+            if steps_read % reduction_ratio == 0:
+                writer.begin_step()
+                writer.put(var_out, buf)
+                writer.end_step()
+                bytes_written += buf.nbytes
 
             if steps_read % 100 == 0:
                 elapsed = time.time() - t0
@@ -90,12 +92,6 @@ def run_consumer(input_name: str, output_path: str, adios_config: str):
         if writer is not None:
             try: writer.close()
             except: pass
-        if outfile is not None:
-            try:
-                outfile.flush()
-                os.fsync(outfile.fileno())
-                outfile.close()
-            except: pass
 
     elapsed = time.time() - t0
     gb_read = bytes_read / (1024**3)
@@ -109,6 +105,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-name",   required=True)
     parser.add_argument("--output-path",  required=True)
+    parser.add_argument("--reduction-ratio", type=int, default=8,
+                        help="Write 1 out of every N steps (default: 8)")
     parser.add_argument("--adios-config", default=os.environ.get("ADIOS2_CONFIG_FILE", "adios2.xml"))
     args = parser.parse_args()
 
@@ -116,6 +114,7 @@ def main():
         input_name=args.input_name,
         output_path=args.output_path,
         adios_config=args.adios_config,
+        reduction_ratio=args.reduction_ratio,
     )
 
 
