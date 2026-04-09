@@ -325,7 +325,10 @@ mapfile -t PROJ_FILES < <(awk '!/^[\\\\|]/' "\${WORK_DIR}/proj_images.tbl" | awk
 N_PROJ=\${#PROJ_FILES[@]}
 echo "  Images to correct: \${N_PROJ}"
 
-# Generate per-node mBackground scripts
+# Parse correction coefficients (id, a, b, c) into arrays
+mapfile -t CORR_LINES < <(awk '!/^[\\\\|]/' "\${WORK_DIR}/corrections.tbl")
+
+# Generate per-node mBackground scripts using explicit A B C coefficients
 for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
     echo "#!/bin/bash" > "\${WORK_DIR}/mbg_node\${node_idx}.sh"
 done
@@ -333,6 +336,10 @@ done
 for i in \$(seq 0 \$((N_PROJ-1))); do
     node_idx=\$((i % NUM_NODES))
     BASENAME=\$(basename "\${PROJ_FILES[\$i]}")
+    # Extract A B C from corrections.tbl (columns: id, a, b, c)
+    CORR_A=\$(echo "\${CORR_LINES[\$i]}" | awk '{print \$2}')
+    CORR_B=\$(echo "\${CORR_LINES[\$i]}" | awk '{print \$3}')
+    CORR_C=\$(echo "\${CORR_LINES[\$i]}" | awk '{print \$4}')
     if [[ \${NODE_LOCAL} -eq 1 ]]; then
         IN_PATH="\${SSD_WORK}/projected/\${BASENAME}"
         OUT_PATH="\${SSD_WORK}/corrected/\${BASENAME}"
@@ -340,7 +347,7 @@ for i in \$(seq 0 \$((N_PROJ-1))); do
         IN_PATH="\${PROJ_DIR}/\${BASENAME}"
         OUT_PATH="\${CORR_DIR}/\${BASENAME}"
     fi
-    echo "mBackground -t \${IN_PATH} \${OUT_PATH} \${WORK_DIR}/proj_images.tbl \${WORK_DIR}/corrections.tbl > /dev/null 2>&1 &" >> "\${WORK_DIR}/mbg_node\${node_idx}.sh"
+    echo "mBackground \${IN_PATH} \${OUT_PATH} \${CORR_A} \${CORR_B} \${CORR_C} > /dev/null 2>&1 &" >> "\${WORK_DIR}/mbg_node\${node_idx}.sh"
 done
 
 for node_idx in \$(seq 0 \$((NUM_NODES-1))); do
