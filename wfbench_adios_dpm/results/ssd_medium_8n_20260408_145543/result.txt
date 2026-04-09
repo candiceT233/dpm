@@ -1,0 +1,10 @@
+RESULT: size=medium, backend=ssd, nodes=8
+stage1_time_s=374
+stage2_time_s=51
+stage3_time_s=669
+total_time_s=1094
+failed_tasks=0
+status=SUCCESS
+ior_used=1
+nodelist=dc131 dc132 dc135 dc140 dc141 dc142 dc143 dc145
+multinode=true

@@ -1,0 +1,10 @@
+RESULT: size=small, backend=tmpfs, nodes=8
+stage1_time_s=15
+stage2_time_s=6
+stage3_time_s=106
+total_time_s=127
+failed_tasks=0
+status=SUCCESS
+ior_used=1
+nodelist=dc011 dc013 dc014 dc015 dc016 dc018 dc019 dc022
+multinode=true
