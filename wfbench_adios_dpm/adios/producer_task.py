@@ -31,7 +31,7 @@ def run_producer(output_name: str, data_size_bytes: int, transfer_size_bytes: in
     adios_obj = adios2.Adios(adios_config)
     io = adios_obj.declare_io("SST_writer")
 
-    # Allocate one transfer-size buffer
+    # Allocate one transfer-size buffer (pre-filled, no per-step computation)
     buf = np.zeros(transfer_size_bytes // 8, dtype=np.float64)
     n_steps = data_size_bytes // transfer_size_bytes
 
@@ -48,7 +48,6 @@ def run_producer(output_name: str, data_size_bytes: int, transfer_size_bytes: in
     try:
         writer = io.open(output_name, adios2.Mode.Write)
         for step in range(n_steps):
-            buf[:] = step  # simulate computation result
             writer.begin_step()
             writer.put(var, buf)
             writer.end_step()

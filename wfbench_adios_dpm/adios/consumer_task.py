@@ -33,6 +33,7 @@ def run_consumer(input_name: str, output_path: str, adios_config: str):
     t0 = time.time()
     steps_read = 0
     bytes_read = 0
+    bytes_written = 0
 
     reader = None
     writer = None
@@ -42,6 +43,7 @@ def run_consumer(input_name: str, output_path: str, adios_config: str):
 
         var_in = None
         var_out = None
+        buf = None
 
         while True:
             status = reader.begin_step(adios2.StepMode.Read, 60.0)
@@ -50,26 +52,21 @@ def run_consumer(input_name: str, output_path: str, adios_config: str):
 
             if var_in is None:
                 var_in = io_in.inquire_variable("data")
-                # count() returns per-step shape (1 MB / 8 bytes = 131072 elements)
                 step_count = var_in.count()
                 buf = np.zeros(step_count, dtype=np.float64)
-                # Output is reduced (1/8th of input)
-                out_count = max(1, buf.shape[0] // 8)
-                out_buf = np.zeros(out_count, dtype=np.float64)
                 if var_out is None:
                     var_out = io_out.define_variable(
-                        "result", out_buf, list(out_buf.shape), [0], list(out_buf.shape)
+                        "data", buf, list(buf.shape), [0], list(buf.shape)
                     )
 
             reader.get(var_in, buf)
             reader.end_step()
 
-            # Simulate analysis computation (simple reduction)
-            out_buf[:] = buf[:out_buf.shape[0]].mean()
-
+            # Write received data to BP5 output (ADIOS native, no computation)
             writer.begin_step()
-            writer.put(var_out, out_buf)
+            writer.put(var_out, buf)
             writer.end_step()
+            bytes_written += buf.nbytes
 
             steps_read += 1
             bytes_read += buf.nbytes
@@ -93,12 +90,19 @@ def run_consumer(input_name: str, output_path: str, adios_config: str):
         if writer is not None:
             try: writer.close()
             except: pass
+        if outfile is not None:
+            try:
+                outfile.flush()
+                os.fsync(outfile.fileno())
+                outfile.close()
+            except: pass
 
     elapsed = time.time() - t0
     gb_read = bytes_read / (1024**3)
+    gb_written = bytes_written / (1024**3)
     bw = gb_read / elapsed if elapsed > 0 else 0
-    print(f"[consumer] DONE: {steps_read} steps, {gb_read:.2f} GB read in {elapsed:.1f}s "
-          f"({bw:.2f} GB/s)")
+    print(f"[consumer] DONE: {steps_read} steps, {gb_read:.2f} GB read, "
+          f"{gb_written:.2f} GB written in {elapsed:.1f}s ({bw:.2f} GB/s)")
 
 
 def main():

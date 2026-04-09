@@ -57,7 +57,7 @@ cat > "${JOB_SCRIPT}" << SLURM_EOF
 #SBATCH --partition=${PARTITION}
 #SBATCH --account=${ACCOUNT}
 #SBATCH --nodes=${NODES}
-#SBATCH --ntasks-per-node=$((TASKS_PER_NODE * 2))
+#SBATCH --ntasks-per-node=${TASKS_PER_NODE}
 #SBATCH --time=02:00:00
 #SBATCH --output=${RESULTS_DIR}/slurm_%j.out
 #SBATCH --error=${RESULTS_DIR}/slurm_%j.err
@@ -83,9 +83,9 @@ RENDEZVOUS_DIR="${BEEGFS_PATH}/adios_rendezvous_\${SLURM_JOB_ID}"
 mkdir -p "\${RENDEZVOUS_DIR}"
 
 cleanup() {
-    echo "[cleanup] removing \${RENDEZVOUS_DIR} and analysis_out_*.bp"
+    echo "[cleanup] removing \${RENDEZVOUS_DIR} and consumer outputs"
     rm -rf "\${RENDEZVOUS_DIR}"
-    rm -rf "${BEEGFS_PATH}"/analysis_out_*.bp
+    rm -rf "${BEEGFS_PATH}"/analysis_out_\${SLURM_JOB_ID}_*.bp
 }
 trap cleanup EXIT INT TERM
 
@@ -128,7 +128,7 @@ done
 
 python3 ${ROOT_DIR}/adios/consumer_task.py \\
     --input-name "\${RENDEZVOUS_DIR}/sim_out_\${i}" \\
-    --output-path "${BEEGFS_PATH}/analysis_out_\${i}.bp" \\
+    --output-path "${BEEGFS_PATH}/analysis_out_\${SLURM_JOB_ID}_\${i}.bp" \\
     > "${RESULTS_DIR}/consumer_\${i}.log" 2>&1 &
 CONS_PID_\${i}=\\\$!
 
@@ -170,15 +170,30 @@ for i in \$(seq 0 $((N_TASKS-1))); do
 done
 FAILED=\${TASK_FAILURES}
 
-T_END=\$(date +%s)
-STAGE1_TIME=\$((T_END - T_STAGE1_START))
+T_STAGE12_END=\$(date +%s)
+STAGE12_TIME=\$((T_STAGE12_END - T_STAGE1_START))
+echo "Stage 1+2 (SST streaming + write) time: \${STAGE12_TIME}s"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3: ADIOS-native BP5 aggregation (reads consumer BP5 outputs, writes one)
+# ─────────────────────────────────────────────────────────────────────────────
+echo "=== Stage 3: ADIOS BP5 Aggregation ==="
+T_STAGE3_START=\$(date +%s)
+python3 ${ROOT_DIR}/adios/aggregate_bp5.py \
+    --inputs "${BEEGFS_PATH}/analysis_out_\${SLURM_JOB_ID}_*.bp" \
+    --output "${BEEGFS_PATH}/aggregate_\${SLURM_JOB_ID}.bp"
+T_STAGE3_END=\$(date +%s)
+STAGE3_TIME=\$((T_STAGE3_END - T_STAGE3_START))
+echo "Stage 3 time: \${STAGE3_TIME}s"
+rm -rf "${BEEGFS_PATH}/aggregate_\${SLURM_JOB_ID}.bp"
+
+T_TOTAL=\$((T_STAGE3_END - T_STAGE1_START))
 
 {
 echo "RESULT: size=${SIZE}, backend=adios_sst, nodes=${NODES}"
-echo "stage1_time_s=\${STAGE1_TIME}"
-echo "stage2_time_s=0"
-echo "stage3_time_s=0"
-echo "total_time_s=\${STAGE1_TIME}"
+echo "stage12_time_s=\${STAGE12_TIME}"
+echo "stage3_time_s=\${STAGE3_TIME}"
+echo "total_time_s=\${T_TOTAL}"
 echo "failed_tasks=\${FAILED}"
 echo "status=\$([ \${FAILED} -eq 0 ] && echo SUCCESS || echo FAILED)"
 echo "nodelist=\${NODELIST[*]}"
