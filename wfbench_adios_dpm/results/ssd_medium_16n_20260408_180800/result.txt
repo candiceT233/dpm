@@ -1,0 +1,13 @@
+RESULT: size=medium, backend=ssd, nodes=16
+stage1_time_s=774
+staging_12_time_s=1532
+stage2_time_s=25
+staging_23_time_s=1259
+stage3_time_s=0
+total_staging_time_s=2791
+total_time_s=3590
+failed_tasks=3
+status=FAILED
+ior_used=1
+nodelist=dc249 dc250 dc251 dc253 dc254 dc255 dc256 dc257 dc258 dc259 dc260 dc261 dc262 dc267 dc269 dc270
+multinode=true

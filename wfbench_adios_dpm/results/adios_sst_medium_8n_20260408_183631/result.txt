@@ -1,0 +1,8 @@
+RESULT: size=medium, backend=adios_sst, nodes=8
+stage12_time_s=1591
+stage3_time_s=281
+total_time_s=1872
+failed_tasks=0
+status=SUCCESS
+nodelist=dc115 dc116 dc117 dc119 dc120 dc121 dc123 dc124
+multinode=true

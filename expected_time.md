@@ -37,10 +37,10 @@
 | Job ID | Config | Stage 1+2 | Stage 3 | Total | Status |
 |--------|--------|-----------|---------|-------|--------|
 | 640699 | adios_small_8n | 197s | 46s | **243s (4:03)** | SUCCESS |
-| 640701 | adios_medium_8n | | | running (9 min) | |
-| 640703 | adios_large_8n | | | running (9 min) | |
+| 640701 | adios_medium_8n | 1591s | 281s | **1872s (31:12)** | SUCCESS |
+| 640703 | adios_large_8n | | | running (34 min) | |
 | 640705 | adios_small_16n | 194s | 85s | **279s (4:39)** | FAILED (2/32) |
-| 640707 | adios_medium_16n | | | running (9 min) | |
+| 640707 | adios_medium_16n | 1621s | 569s | **2190s (36:30)** | SUCCESS |
 | 640709 | adios_large_16n | running |
 
 ## Completed — WfBench tmpfs w/ scp staging
@@ -60,6 +60,8 @@
 |--------|--------|--------|---------|--------|---------|-------|--------|
 | 640650 | ssd_small_8n | 27s | 295s | 3s | 222s | **585s** | SUCCESS (scp=88%) |
 | 640654 | ssd_medium_8n | 370s | 1447s | 24s | 1047s | **2933s** | FAILED (3/16, scp=85%) |
+| 640658 | ssd_large_8n | — | — | — | — | 1:04:50 | **FAILED** (SSD full) |
+| 640666 | ssd_medium_16n | 774s | 1532s | 25s | 1259s | **3590s** | FAILED (3/16, scp=78%) |
 | 640662 | ssd_small_16n | — | 250s | — | 379s | **716s** | SUCCESS (scp=88%) |
 | 640670 | ssd_large_16n | — | — | — | — | 35:53 | **FAILED** (SSD full — 400GB > 477GB) |
 

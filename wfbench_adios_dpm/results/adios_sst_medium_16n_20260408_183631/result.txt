@@ -1,0 +1,8 @@
+RESULT: size=medium, backend=adios_sst, nodes=16
+stage12_time_s=1621
+stage3_time_s=569
+total_time_s=2190
+failed_tasks=0
+status=SUCCESS
+nodelist=dc193 dc194 dc195 dc196 dc197 dc199 dc200 dc201 dc202 dc204 dc205 dc206 dc207 dc208 dc209 dc210
+multinode=true
