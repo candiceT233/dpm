@@ -60,6 +60,7 @@
 | 639320 | beegfs_medium_8n | 16:39 |
 | 639322 | beegfs_large_8n | 1:25:55 |
 | 639324 | beegfs_small_16n | 5:03 |
+| 639326 | beegfs_medium_16n | 33:57 |
 
 ### Montage (real 2MASS small, beegfs only — done)
 
@@ -73,9 +74,7 @@
 
 | Job ID | Config | Elapsed | Est. remaining |
 |--------|--------|---------|---------------|
-| 639326 | wf_beegfs_medium_16n | 1:26 | ~28 min |
-| 639696 | montage_synth_small_beegfs_4n (test) | 39 min | ~20 min |
-| 640605 | wf_ssd_small_8n (scp staging test) | just started | ~5 min |
+| 639328 | wf_beegfs_large_16n | 4 min | ~2 hr |
 
 ## Pending — Chain A (sequential, BeeGFS)
 
@@ -92,22 +91,38 @@
 | 639340 | dpm_mixed_large_16n | ~120 min |
 | **Total** | **9 jobs** | **~406 min (~6.8h)** |
 
-## Pending — Montage synth_medium (not yet submitted)
+## Completed — Montage synth_small test
 
-Waiting for test job 639686 to validate pipeline, then submit 9 jobs:
-- synth_medium × beegfs/ssd/tmpfs × 4/8/16 nodes (all sequential, ~6h total)
-- Note: Montage SSD/tmpfs staging scripts have been fixed (use script files)
+| Job ID | Config | Elapsed | Intermediate | Status |
+|--------|--------|---------|-------------|--------|
+| 639696 | beegfs_synth_small_4n | **47:30** | 30.7 GB | SUCCESS |
+
+mProject dominated: 2738s (45 min) for 208 synthetic 2048² images on BeeGFS.
+
+## Completed — SSD with scp staging test
+
+| Job ID | Config | Stage1 | scp 1→2 | Stage2 | scp 2→3 | Stage3 | Total | Status |
+|--------|--------|--------|---------|--------|---------|--------|-------|--------|
+| 640605 | ssd_small_8n | 37s | **252s** | 3s | **205s** | 12s | **509s** | SUCCESS |
+
+**scp staging = 90% of total time.** SSD+scp (509s) is 3x slower than BeeGFS (158s).
+
+## Pending — Montage synth_small full matrix (not yet submitted)
+
+9 jobs: synth_small × beegfs/ssd/tmpfs × 4/8/16 nodes (all sequential, ~7h total based on 47min/job)
+Note: Montage SSD/tmpfs staging scripts fixed (use script files instead of bash -c)
 
 ## Key Findings (paper-ready)
 
 | Finding | Data |
 |---------|------|
-| **tmpfs >> SSD >> BeeGFS** for WfBench | tmpfs: 2-4 min, SSD: 3-42 min, BeeGFS: 3-17+ min (large still running) |
-| **16n slower than 8n for SSD medium** | 42 min vs 18 min — 2.4 TB total data overwhelms per-node SSD bandwidth |
-| **ADIOS SST succeeds at medium scale** | small+medium SUCCESS on 8n/16n with co-launch fix |
-| **ADIOS SST rendezvous fails with separate srun** | 8n: 16/16 failed, 16n: 32/32 failed (old approach) |
+| **tmpfs >> SSD >> BeeGFS** for WfBench (no staging) | tmpfs: 2-4 min, SSD: 3-42 min, BeeGFS: 3-86 min |
+| **SSD+scp staging slower than BeeGFS** | ssd_small_8n: 509s (90% scp) vs beegfs: 158s — data movement dominates |
+| **16n slower than 8n for SSD medium** | 42 min vs 18 min — 2.4 TB total data overwhelms bandwidth |
+| **ADIOS SST succeeds through large** | small+medium fast, large barely completes at ~2h (7194s) |
+| **ADIOS SST rendezvous fails with separate srun** | Fixed by co-launching producer+consumer on same node |
 | **Montage scales with nodes (real data)** | 4n: 3:35, 8n: 2:13, 16n: 1:30 |
-| **Synthetic FITS valid for Montage** | mImgtbl parses all, mProject produces correct output |
+| **Montage synth_small = 30.7 GB intermediate** | 47 min on beegfs/4n, mProject dominates (45 min) |
 | **~2.6× I/O amplification in Montage** | Read amplification from fan-out DAG structure |
 
 ## Third node scale decision
