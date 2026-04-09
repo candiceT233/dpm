@@ -1,0 +1,13 @@
+RESULT: size=large, backend=tmpfs, nodes=8
+stage1_time_s=53
+staging_12_time_s=9
+stage2_time_s=1
+staging_23_time_s=14
+stage3_time_s=0
+total_staging_time_s=23
+total_time_s=77
+failed_tasks=32
+status=FAILED
+ior_used=1
+nodelist=dc079 dc080 dc086 dc090 dc093 dc096 dc235 dc236
+multinode=true

@@ -1,0 +1,13 @@
+RESULT: size=small, backend=tmpfs, nodes=8
+stage1_time_s=9
+staging_12_time_s=258
+stage2_time_s=11
+staging_23_time_s=222
+stage3_time_s=15
+total_staging_time_s=480
+total_time_s=515
+failed_tasks=0
+status=SUCCESS
+ior_used=1
+nodelist=dc211 dc212 dc213 dc214 dc215 dc216 dc217 dc218
+multinode=true

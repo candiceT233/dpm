@@ -58,7 +58,7 @@ cat > "${JOB_SCRIPT}" << SLURM_EOF
 #SBATCH --account=${ACCOUNT}
 #SBATCH --nodes=${NODES}
 #SBATCH --ntasks-per-node=${TASKS_PER_NODE}
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=${RESULTS_DIR}/slurm_%j.out
 #SBATCH --error=${RESULTS_DIR}/slurm_%j.err
 

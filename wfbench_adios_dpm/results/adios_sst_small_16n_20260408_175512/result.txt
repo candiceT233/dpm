@@ -1,0 +1,8 @@
+RESULT: size=small, backend=adios_sst, nodes=16
+stage12_time_s=262
+stage3_time_s=950
+total_time_s=1212
+failed_tasks=0
+status=SUCCESS
+nodelist=dc249 dc250 dc251 dc253 dc254 dc255 dc256 dc257 dc258 dc259 dc260 dc261 dc262 dc267 dc269 dc270
+multinode=true
