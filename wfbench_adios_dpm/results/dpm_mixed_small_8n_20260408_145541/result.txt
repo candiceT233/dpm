@@ -1,0 +1,15 @@
+RESULT: size=small, backend=dpm_mixed, nodes=8
+stage1_time_s=32
+staging_time_s=101
+stage2_time_s=2
+stage3_time_s=97
+total_time_s=232
+failed_tasks=0
+status=SUCCESS
+ior_used=1
+stage1_storage=beegfs
+staging=beegfs_to_per_node_ssd
+stage2_storage=ssd
+stage3_storage=ssd_to_beegfs_agg
+nodelist=dc070 dc074 dc077 dc078 dc084 dc087 dc089 dc092
+multinode=true

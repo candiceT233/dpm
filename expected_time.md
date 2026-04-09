@@ -25,6 +25,9 @@
 | 639322 | beegfs_large_8n | 1:25:55 |
 | 639324 | beegfs_small_16n | 5:03 |
 | 639326 | beegfs_medium_16n | 33:57 |
+| 639328 | beegfs_large_16n | **3:00:17** (stage3=8826s, 82%) |
+| 639330 | dpm_mixed_small_8n | 232s (staging=101s) |
+| 639332 | dpm_mixed_medium_8n | 1762s (staging=791s, 45%) |
 
 ## ADIOS SST — previous results INVALIDATED
 
@@ -38,7 +41,7 @@
 |--------|--------|-----------|---------|-------|--------|
 | 640699 | adios_small_8n | 197s | 46s | **243s (4:03)** | SUCCESS |
 | 640701 | adios_medium_8n | 1591s | 281s | **1872s (31:12)** | SUCCESS |
-| 640703 | adios_large_8n | | | running (34 min) | |
+| 640703 | adios_large_8n | 7813s | 1158s | **8971s (2:29:31)** | SUCCESS |
 | 640705 | adios_small_16n | 194s | 85s | **279s (4:39)** | FAILED (2/32) |
 | 640707 | adios_medium_16n | 1621s | 569s | **2190s (36:30)** | SUCCESS |
 | 640709 | adios_large_16n | running |

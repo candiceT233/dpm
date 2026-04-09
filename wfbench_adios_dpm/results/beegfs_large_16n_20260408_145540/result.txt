@@ -1,0 +1,10 @@
+RESULT: size=large, backend=beegfs, nodes=16
+stage1_time_s=1028
+stage2_time_s=955
+stage3_time_s=8826
+total_time_s=10809
+failed_tasks=0
+status=SUCCESS
+ior_used=1
+nodelist=dc034 dc035 dc036 dc039 dc041 dc042 dc043 dc044 dc045 dc046 dc047 dc048 dc049 dc050 dc051 dc052
+multinode=true
