@@ -13,6 +13,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "${SCRIPT_DIR}")"
 
+# Load config (provides MONTAGE_PY, etc.)
+CONFIG_FILE="${ROOT_DIR}/config.env"
+if [[ -f "${CONFIG_FILE}" ]]; then
+    source "${CONFIG_FILE}"
+fi
+
 SIZE="large"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,11 +47,18 @@ echo "Location: ${LOCATION}"
 echo "Region: ${REGION_DEG} degrees"
 echo "Output: ${DATA_DIR}"
 
-# Use Montage's Python mArchiveDownload
-MONTAGE_PY="${MONTAGE_PY:-/people/tang584/install/Montage/python/MontagePy}"
+# Use Montage's Python mArchiveDownload (path comes from config.env)
+if [[ -z "${MONTAGE_PY:-}" ]]; then
+    echo "ERROR: MONTAGE_PY is not set."
+    echo "  Set MONTAGE_PY in ${CONFIG_FILE} (or export it) to the directory"
+    echo "  containing mArchiveDownload.py — typically <Montage_src>/python/MontagePy."
+    echo "  See SETUP_AGENT.md (Step 2: Compile Montage) for installation."
+    exit 1
+fi
 if [[ ! -f "${MONTAGE_PY}/mArchiveDownload.py" ]]; then
     echo "ERROR: MontagePy not found at ${MONTAGE_PY}"
-    echo "Set MONTAGE_PY to the path containing mArchiveDownload.py"
+    echo "  Expected file: ${MONTAGE_PY}/mArchiveDownload.py"
+    echo "  Re-check MONTAGE_PY in ${CONFIG_FILE}."
     exit 1
 fi
 

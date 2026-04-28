@@ -23,9 +23,10 @@ if [[ -n "${MONTAGE_BIN}" ]] && [[ -f "${MONTAGE_BIN}/mImgtbl" ]]; then
     echo "  Montage binaries found at ${MONTAGE_BIN}"
 else
     echo "  ERROR: Montage binaries not found at ${MONTAGE_BIN}"
-    echo "  Compile Montage first:"
-    echo "    cd /path/to/Montage && make"
-    echo "  Then set MONTAGE_BIN in config.env"
+    echo "  Compile Montage first — see SETUP_AGENT.md Step 2:"
+    echo "    git clone https://github.com/Caltech-IPAC/Montage.git \"\${MONTAGE_SRC}\""
+    echo "    cd \"\${MONTAGE_SRC}\" && make"
+    echo "  Then set MONTAGE_BIN and MONTAGE_PY in config.env."
     exit 1
 fi
 
@@ -38,6 +39,16 @@ for tool in mImgtbl mProjExec mOverlaps mDiffExec mFitExec mBgModel mBgExec mAdd
         echo "  ${tool}: MISSING"
     fi
 done
+
+# ── Verify MontagePy (used by scripts/download_data.sh) ─────────────────────
+echo "==> Checking MontagePy (for IRSA download)"
+if [[ -n "${MONTAGE_PY:-}" ]] && [[ -f "${MONTAGE_PY}/mArchiveDownload.py" ]]; then
+    echo "  MontagePy found at ${MONTAGE_PY}"
+else
+    echo "  WARNING: MONTAGE_PY not set or mArchiveDownload.py missing."
+    echo "  Set MONTAGE_PY in config.env to <Montage_src>/python/MontagePy"
+    echo "  before running scripts/download_data.sh."
+fi
 
 # ── Python environment (for data download and analysis) ─────────────────────
 echo "==> Setting up Python environment"

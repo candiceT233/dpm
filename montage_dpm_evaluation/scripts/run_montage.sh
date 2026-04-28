@@ -90,8 +90,10 @@ set -u
 if [[ -n "${DARSHAN_LIB}" ]] && [[ -f "${DARSHAN_LIB}" ]]; then
     export LD_PRELOAD="${DARSHAN_LIB}"
     export DARSHAN_ENABLE_NONMPI=1
-    # Darshan uses compiled-in default log path: /qfs/people/tang584/experiments/darshan-logs/YYYY/MM/DD/
-    DARSHAN_DEFAULT_LOG="/qfs/people/tang584/experiments/darshan-logs/\$(date +%Y)/\$(date +%-m)/\$(date +%-d)"
+    # Darshan log root: configurable via DARSHAN_LOG_DIR in config.env.
+    # Falls back to ${ROOT_DIR}/results/darshan-logs so the folder stays self-contained.
+    DARSHAN_LOG_ROOT="${DARSHAN_LOG_DIR:-${ROOT_DIR}/results/darshan-logs}"
+    DARSHAN_DEFAULT_LOG="\${DARSHAN_LOG_ROOT}/\$(date +%Y)/\$(date +%-m)/\$(date +%-d)"
     mkdir -p "\${DARSHAN_DEFAULT_LOG}"
     echo "[montage] Darshan tracing enabled → \${DARSHAN_DEFAULT_LOG}"
 fi

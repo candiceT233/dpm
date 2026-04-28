@@ -1,14 +1,57 @@
 # SETUP_AGENT.md — Onboarding Guide for Montage DPM Evaluation
 
 This file is written for an AI terminal agent or human setting up this evaluation
-from scratch on an HPC cluster. It covers: discovering the cluster environment,
-compiling Montage, downloading ~6.3 GB of FITS data from IRSA, and running the
-full 10-stage pipeline across storage-parallelism configurations.
+**from scratch on a fresh HPC cluster**. It is intended to be self-contained:
+following the steps in order will produce a working Montage installation, the
+input dataset, and the full evaluation results — with no path or tool assumed
+to exist outside what this guide installs or detects.
+
+It covers: discovering the cluster environment, compiling Montage from source,
+downloading ~6.3 GB of FITS data from IRSA, and running the full 10-stage
+pipeline across storage-parallelism configurations.
 
 **Key constraint**: The input data (~1,425 FITS images, ~6.3 GB) cannot be
 transferred from another machine. It must be downloaded directly on the cluster
 from IRSA (NASA/IPAC Infrared Science Archive) using Montage's built-in Python
 downloader or curl/wget.
+
+## Conventions used below
+
+Throughout this guide, paths are written with shell variables instead of
+hardcoded absolute paths so the instructions work on any cluster:
+
+| Variable      | Meaning                                                        |
+|---------------|----------------------------------------------------------------|
+| `${ROOT_DIR}` | This evaluation folder (the directory containing `README.md`)  |
+| `${MONTAGE_SRC}` | Where you cloned the Montage source tree                    |
+| `${INSTALL_PREFIX}` | A directory you control for software installs (e.g. `${HOME}/install`) |
+
+Pick concrete values for these once at the start of your session, e.g.:
+
+```bash
+export ROOT_DIR="$(pwd)"                       # if you are in this folder
+export INSTALL_PREFIX="${HOME}/install"
+export MONTAGE_SRC="${INSTALL_PREFIX}/Montage"
+mkdir -p "${INSTALL_PREFIX}"
+```
+
+## Prerequisites (verify these before starting)
+
+The cluster must provide:
+
+- **Compilers and build tools**: `gcc`, `make` (Montage compiles from C source).
+- **Python ≥ 3.8**: for IRSA download and analysis. A user-writable virtualenv
+  or conda env is sufficient — no system-Python modifications needed.
+- **Slurm**: for batch submission (`sbatch`, `srun`, `squeue`, `scontrol`).
+- **Internet access from at least one node** (login node is fine) to reach
+  `irsa.ipac.caltech.edu` for the 2MASS dataset.
+- **At least three storage tiers reachable from compute nodes**: a node-local
+  SSD, a shared parallel filesystem (BeeGFS / Lustre / GPFS / NFS), and tmpfs
+  (`/dev/shm`). The probe in Step 0 will detect them.
+- **Disk budget**: ~7 GB for raw FITS, ~30 GB peak per run for intermediate
+  data (large config), ~5–10 GB for output mosaics across all runs.
+
+No root/sudo access is required. Everything installs into `${INSTALL_PREFIX}`.
 
 ---
 
@@ -94,82 +137,117 @@ Record from the probe:
 ## Step 1: Fill in config.env
 
 ```bash
-cd /path/to/montage_dpm_evaluation/
+cd "${ROOT_DIR}"
 cp config.env.template config.env
 ```
 
-Edit `config.env` — replace every `TODO`:
+Edit `config.env` — replace every `TODO` with values from the probe (Step 0)
+and from the install steps that follow. Use whatever your cluster's actual
+names are; the example below shows the **shape** of the values, not literal
+paths to copy.
 
 ```bash
-CLUSTER_NAME="deception"
-PARTITION="slurm"
-ACCOUNT="myproject"
+CLUSTER_NAME="<your cluster>"          # e.g. deception, tahoma, perlmutter
+PARTITION="<slurm partition>"          # from sinfo
+ACCOUNT="<slurm account>"              # from sacctmgr
 
-CORES_PER_NODE=64
-MEM_PER_NODE_GB=384
+CORES_PER_NODE=<int>                   # from probe (nproc)
+MEM_PER_NODE_GB=<int>                  # from probe (free -h)
 
-LOCAL_SSD_PATH="/local/scratch"
-BEEGFS_PATH="/rcfs/projects/myproject"
+LOCAL_SSD_PATH="<node-local SSD mount>"  # from probe, e.g. /local/scratch, /nvme
+BEEGFS_PATH="<shared parallel FS path>"  # from probe, e.g. /rcfs/projects/<acct>
 TMPFS_PATH="/dev/shm"
 
-MONTAGE_BIN="/path/to/Montage/bin"    # Set after Step 2
-MONTAGE_DATA="/path/to/montage_dpm_evaluation/data"
-PYTHON_ENV="/path/to/.venv"           # Set after Step 2
-DARSHAN_LIB=""                        # Optional
-DPM_PROFILE_DIR=""                    # Optional
+MONTAGE_BIN="${MONTAGE_SRC}/bin"             # filled in after Step 2
+MONTAGE_PY="${MONTAGE_SRC}/python/MontagePy" # filled in after Step 2 — used by download_data.sh
+MONTAGE_DATA="${ROOT_DIR}/data"
+PYTHON_ENV="${ROOT_DIR}/.venv"               # or path to a conda env
+DARSHAN_LIB=""                               # Optional — path to libdarshan.so
+DARSHAN_LOG_DIR=""                           # Optional — log root; defaults to ${ROOT_DIR}/results/darshan-logs
+DPM_PROFILE_DIR=""                           # Optional
 ```
 
 ---
 
 ## Step 2: Compile Montage and Set Up Python
 
+This step builds Montage from source into `${MONTAGE_SRC}` and creates a
+Python virtualenv inside `${ROOT_DIR}`. Both produce the values you put into
+`config.env` (`MONTAGE_BIN`, `MONTAGE_PY`, `PYTHON_ENV`).
+
 ### Compile Montage from source
 
-Montage is a self-contained C toolkit with no external dependencies:
+Montage is a self-contained C toolkit with no external dependencies beyond a
+working C compiler:
 
 ```bash
-# Clone or use existing repo
-git clone https://github.com/Caltech-IPAC/Montage.git
-cd Montage
+# Pick an install location you control
+export INSTALL_PREFIX="${INSTALL_PREFIX:-${HOME}/install}"
+mkdir -p "${INSTALL_PREFIX}"
+cd "${INSTALL_PREFIX}"
 
-# Apply patch if needed (JPEG library fix for some systems)
+# Clone the upstream repo
+git clone https://github.com/Caltech-IPAC/Montage.git
+export MONTAGE_SRC="${INSTALL_PREFIX}/Montage"
+cd "${MONTAGE_SRC}"
+
+# Apply patch if needed (JPEG library fix for some systems).
 # Only needed if compilation fails on jconfig.h:
-# sed -i 's/#define DONT_USE_B_MODE 1/\/* #undef DONT_USE_B_MODE *\//' lib/src/jpeg-8b/jconfig.h
+# sed -i 's/#define DONT_USE_B_MODE 1/\/* #undef DONT_USE_B_MODE *\//' \
+#     lib/src/jpeg-8b/jconfig.h
 
 make
 
 # Verify binaries exist
-ls bin/mImgtbl bin/mProjExec bin/mOverlaps bin/mDiffExec bin/mFitExec \
-   bin/mBgModel bin/mBgExec bin/mAdd
+ls "${MONTAGE_SRC}/bin/mImgtbl" \
+   "${MONTAGE_SRC}/bin/mProjExec" \
+   "${MONTAGE_SRC}/bin/mOverlaps" \
+   "${MONTAGE_SRC}/bin/mDiffExec" \
+   "${MONTAGE_SRC}/bin/mFitExec" \
+   "${MONTAGE_SRC}/bin/mBgModel" \
+   "${MONTAGE_SRC}/bin/mBgExec" \
+   "${MONTAGE_SRC}/bin/mAdd"
 
-# Record the path
-echo "MONTAGE_BIN=$(pwd)/bin"
+# Verify the Python helpers ship with the source tree
+ls "${MONTAGE_SRC}/python/MontagePy/mArchiveDownload.py"
+
+# Record the paths for config.env
+echo "MONTAGE_BIN=${MONTAGE_SRC}/bin"
+echo "MONTAGE_PY=${MONTAGE_SRC}/python/MontagePy"
 ```
 
-Update `MONTAGE_BIN` in `config.env` to the `bin/` directory path.
+Update `MONTAGE_BIN` and `MONTAGE_PY` in `config.env` to those paths.
+`MONTAGE_PY` is required by `scripts/download_data.sh` (Step 3) — without it,
+the download will fail with a clear error.
 
 ### Set up Python environment
 
 Python is needed for data download and analysis (not for the Montage pipeline itself):
 
 ```bash
-python3 -m venv /path/to/montage_dpm_evaluation/.venv
-source /path/to/montage_dpm_evaluation/.venv/bin/activate
+cd "${ROOT_DIR}"
+python3 -m venv "${ROOT_DIR}/.venv"
+source "${ROOT_DIR}/.venv/bin/activate"
 
 pip install --upgrade pip
 pip install numpy pandas matplotlib
 
 # Update PYTHON_ENV in config.env
-echo "PYTHON_ENV=$(pwd)/.venv"
+echo "PYTHON_ENV=${ROOT_DIR}/.venv"
 ```
+
+If your cluster prefers conda, substitute a conda env path for `${ROOT_DIR}/.venv`
+and set `PYTHON_ENV` accordingly.
 
 ### Verify setup
 
 ```bash
+cd "${ROOT_DIR}"
 bash scripts/setup_env.sh
 ```
 
-This checks: Montage binaries, Python packages, storage paths.
+This checks: Montage binaries, Python packages, storage paths. It is safe to
+re-run — it only verifies and (if needed) creates `${ROOT_DIR}/.venv`.
 
 ---
 
@@ -189,21 +267,32 @@ cluster. There are three methods depending on your cluster's setup.
 | Expected size | ~6.3 GB (decompressed) |
 | Source | IRSA (NASA/IPAC Infrared Science Archive) |
 
-### Method A: Use Montage's mArchiveDownload (recommended)
+### Method A: Use the download script (recommended)
 
-This is the simplest approach. It queries IRSA's archive API and downloads
-all matching images automatically.
+`scripts/download_data.sh` reads `MONTAGE_PY` from `config.env`, calls
+`mArchiveDownload`, and also generates the `region.hdr` mosaic header. This
+is the simplest path and is what the rest of the pipeline expects.
 
 ```bash
-cd /path/to/montage_dpm_evaluation/
+cd "${ROOT_DIR}"
+bash scripts/download_data.sh --size large
+```
 
-# Get the MontagePy download scripts from the Montage repo
-MONTAGE_PY="/path/to/Montage/python/MontagePy"
+**Expected output**: ~1,425 FITS files in `${ROOT_DIR}/data/large/raw_images`,
+~6.3 GB total, plus `${ROOT_DIR}/data/large/region.hdr`.
 
-# Create data directory
-mkdir -p data/large/raw_images
+If `MONTAGE_PY` is unset or wrong, the script exits with a clear error pointing
+back to `config.env`.
 
-# Download all 2MASS J-band images for a 6° region around M17
+### Method B: Call mArchiveDownload directly
+
+Useful if you want to debug download issues without the wrapper script:
+
+```bash
+cd "${ROOT_DIR}"
+source config.env                     # picks up MONTAGE_PY
+mkdir -p "${ROOT_DIR}/data/large/raw_images"
+
 python3 -c "
 import sys
 sys.path.insert(0, '${MONTAGE_PY}')
@@ -214,24 +303,17 @@ print('Survey: 2MASS J, Location: M17, Size: 6.0 degrees')
 print('This will download ~1,425 FITS files (~6.3 GB). This may take 30-60 minutes.')
 print()
 
-result = mArchiveDownload('2MASS J', 'M17', 6.0, 'data/large/raw_images')
+result = mArchiveDownload('2MASS J', 'M17', 6.0, '${ROOT_DIR}/data/large/raw_images')
 print(f'Result: {result}')
 "
 
 # Verify download
-echo "Downloaded $(ls data/large/raw_images/*.fits | wc -l) FITS files"
-echo "Total size: $(du -sh data/large/raw_images | cut -f1)"
+echo "Downloaded $(ls ${ROOT_DIR}/data/large/raw_images/*.fits | wc -l) FITS files"
+echo "Total size:  $(du -sh ${ROOT_DIR}/data/large/raw_images | cut -f1)"
 ```
 
-**Expected output**: ~1,425 files, ~6.3 GB total.
-
-### Method B: Use the download script
-
-```bash
-bash scripts/download_data.sh --size large
-```
-
-This wraps Method A and also generates the `region.hdr` file.
+Note: Method B does **not** generate `region.hdr` — if you go this route, run
+the header-generation block in "Generate region.hdr" below before continuing.
 
 ### Method C: Manual download with curl (if MontagePy fails)
 
@@ -239,8 +321,8 @@ If the Python downloader fails (SSL issues, timeouts), you can query the
 archive API directly and download with curl/wget:
 
 ```bash
-mkdir -p data/large/raw_images
-cd data/large
+mkdir -p "${ROOT_DIR}/data/large/raw_images"
+cd "${ROOT_DIR}/data/large"
 
 # Step 1: Query IRSA for the image list (JSON)
 curl -s "http://montage.ipac.caltech.edu/cgi-bin/ArchiveList/nph-archivelist?survey=2MASS+J&location=M17&size=6.0&units=deg&mode=JSON" \
@@ -287,7 +369,8 @@ FITS files with the correct headers for Montage to process. This tests
 the I/O pipeline without real astronomical data:
 
 ```bash
-mkdir -p data/large/raw_images
+mkdir -p "${ROOT_DIR}/data/large/raw_images"
+cd "${ROOT_DIR}"
 
 python3 << 'PYEOF'
 import numpy as np
@@ -374,11 +457,13 @@ not astronomical accuracy.
 
 ### Generate region.hdr (required for all methods)
 
-After downloading/generating images, create the mosaic target header:
+After downloading/generating images, create the mosaic target header.
+Method A already does this for you — only run this block if you used Method B,
+C, or D.
 
 ```bash
 # For the large (6-degree) dataset
-cat > data/large/region.hdr << 'EOF'
+cat > "${ROOT_DIR}/data/large/region.hdr" << 'EOF'
 SIMPLE  = T
 BITPIX  = -64
 NAXIS   = 2
@@ -397,21 +482,23 @@ EQUINOX = 2000.0
 END
 EOF
 
-echo "Created data/large/region.hdr"
+echo "Created ${ROOT_DIR}/data/large/region.hdr"
 ```
 
 ### Verify data is ready
 
 ```bash
-N_FITS=$(ls data/large/raw_images/*.fits 2>/dev/null | wc -l)
-DATA_SIZE=$(du -sh data/large/raw_images 2>/dev/null | cut -f1)
+source "${ROOT_DIR}/config.env"   # provides MONTAGE_BIN
+
+N_FITS=$(ls "${ROOT_DIR}/data/large/raw_images"/*.fits 2>/dev/null | wc -l)
+DATA_SIZE=$(du -sh "${ROOT_DIR}/data/large/raw_images" 2>/dev/null | cut -f1)
 echo "FITS files: ${N_FITS}"
 echo "Total size: ${DATA_SIZE}"
-echo "region.hdr: $([ -f data/large/region.hdr ] && echo 'OK' || echo 'MISSING')"
+echo "region.hdr: $([ -f ${ROOT_DIR}/data/large/region.hdr ] && echo 'OK' || echo 'MISSING')"
 
 # Quick Montage validation — does mImgtbl parse the images?
 export PATH="${MONTAGE_BIN}:${PATH}"
-mImgtbl data/large/raw_images /tmp/test_images.tbl
+mImgtbl "${ROOT_DIR}/data/large/raw_images" /tmp/test_images.tbl
 echo "mImgtbl found $(grep -c '|' /tmp/test_images.tbl) valid images"
 rm -f /tmp/test_images.tbl
 ```
@@ -501,6 +588,7 @@ demonstrates that storage selection matters (DPM would avoid this config).
 ### Montage compilation fails
 
 ```bash
+cd "${MONTAGE_SRC}"
 # Common fix: JPEG library issue
 sed -i 's/#define DONT_USE_B_MODE 1/\/* #undef DONT_USE_B_MODE *\//' \
   lib/src/jpeg-8b/jconfig.h
