@@ -217,8 +217,6 @@ echo "MONTAGE_PY=${MONTAGE_SRC}/python/MontagePy"
 ```
 
 Update `MONTAGE_BIN` and `MONTAGE_PY` in `config.env` to those paths.
-`MONTAGE_PY` is required by `scripts/download_data.sh` (Step 3) — without it,
-the download will fail with a clear error.
 
 ### Set up Python environment
 

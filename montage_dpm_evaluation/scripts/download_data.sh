@@ -3,6 +3,8 @@
 #
 # Uses Montage's mArchiveDownload (Python) to fetch 2MASS J-band images
 # from IRSA for a region around M17 (galactic plane, dense overlap).
+# See scripts/README.md for what MONTAGE_PY is and where mArchiveDownload.py
+# comes from.
 #
 # Usage:
 #   bash scripts/download_data.sh --size small    # ~100 images, ~0.4 GB
@@ -47,18 +49,10 @@ echo "Location: ${LOCATION}"
 echo "Region: ${REGION_DEG} degrees"
 echo "Output: ${DATA_DIR}"
 
-# Use Montage's Python mArchiveDownload (path comes from config.env)
-if [[ -z "${MONTAGE_PY:-}" ]]; then
-    echo "ERROR: MONTAGE_PY is not set."
-    echo "  Set MONTAGE_PY in ${CONFIG_FILE} (or export it) to the directory"
-    echo "  containing mArchiveDownload.py — typically <Montage_src>/python/MontagePy."
-    echo "  See SETUP_AGENT.md (Step 2: Compile Montage) for installation."
-    exit 1
-fi
-if [[ ! -f "${MONTAGE_PY}/mArchiveDownload.py" ]]; then
-    echo "ERROR: MontagePy not found at ${MONTAGE_PY}"
-    echo "  Expected file: ${MONTAGE_PY}/mArchiveDownload.py"
-    echo "  Re-check MONTAGE_PY in ${CONFIG_FILE}."
+# Use Montage's Python mArchiveDownload (path comes from config.env).
+if [[ -z "${MONTAGE_PY:-}" ]] || [[ ! -f "${MONTAGE_PY}/mArchiveDownload.py" ]]; then
+    echo "ERROR: mArchiveDownload.py not found via MONTAGE_PY='${MONTAGE_PY:-<unset>}'."
+    echo "       See scripts/README.md for what to set MONTAGE_PY to."
     exit 1
 fi
 
