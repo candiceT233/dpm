@@ -112,7 +112,14 @@ TEST_CONFIGS = {
         "ALLOWED_PARALLELISM": [1],
         "exp_data_path": "./template_workflow",
         "test_folders": ['template_t1']
-    }
+    },
+    "montage": {
+        "SCRIPT_ORDER": "montage_script_order_v1",
+        "NUM_NODES_LIST": [1],
+        "ALLOWED_PARALLELISM": [1],
+        "exp_data_path": "./montage",
+        "test_folders": ['montage_2n_16blue']
+    },
 }
 
 # Default workflow configuration

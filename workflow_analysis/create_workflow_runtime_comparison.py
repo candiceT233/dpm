@@ -20,10 +20,10 @@ runtime_data = {
         'FaasFlow': 424
     },
     'PyFLRXTRKR': {
-        'DPM': 423,
+        'DPM': 443.72,  # BeeGFS 8n (DPM storage choice for Pyflextrkr)
         'dagP': 474,
-        'DFMan': 494,
-        'FaasFlow': 529
+        'DFMan': 548.42,   # includes SSD 16n data movement (stages 0.5-4.5) for stages 1-5
+        'FaasFlow': 676.20  # includes SSD 4n data movement (stages 0.5-4.5, 7.5, 8.5) for all stages
     },
     'DDMD': {
         'DPM': 445,
@@ -33,7 +33,8 @@ runtime_data = {
     }
 }
 
-# Speedup annotations (from PDF)
+# Speedup annotations (DPM vs each method; computed from runtime_data)
+# Format: "X.x faster than <method>" when method_runtime > DPM runtime
 speedup_annotations = {
     '1000 Genome': {
         'dagP': '2.9x faster than dagP',
@@ -41,9 +42,9 @@ speedup_annotations = {
         'FaasFlow': '2.0x faster than FaasFlow'
     },
     'PyFLRXTRKR': {
-        'dagP': '1.1x faster than dagP',
-        'DFMan': '1.2x faster than DFMan',
-        'FaasFlow': '1.4x faster than FaasFlow'
+        'dagP': '1.1x faster than dagP',      # 474 / 443.72
+        'DFMan': '1.2x faster than DFMan',    # 548.42 / 443.72
+        'FaasFlow': '1.5x faster than FaasFlow'   # 676.20 / 443.72
     },
     'DDMD': {
         'dagP': '1.0x faster than dagP',

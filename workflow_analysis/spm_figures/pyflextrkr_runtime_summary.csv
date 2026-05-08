@@ -1,5 +1,5 @@
 scheduling_method,storage_config,total_runtime_seconds,idfea_seconds,idfymcs_seconds,matchpf_seconds,robustmcs_seconds,single_seconds,speed_seconds,stats_seconds,tracks_seconds
 dagP,BeeGFS 4n,474.90,149.29,16.12,23.02,23.50,152.63,9.26,19.01,56.67
-DFMan,SSD 16n / BeeGFS 16n,494.64,172.04,15.06,20.38,19.19,165.71,7.10,19.50,54.90
-FaasFlow,SSD 4n,589.12,175.35,17.05,22.81,43.37,169.80,22.59,21.24,57.77
-DPM,TMPFS 16n,1094.04,166.43,15.24,20.20,200.91,162.74,128.36,20.16,56.25
+DFMan,TMPFS 16n / BeeGFS 16n,548.42,195.83,17.82,20.46,19.19,185.44,7.10,22.81,59.02
+FaasFlow,TMPFS 4n,676.20,202.37,19.49,22.57,42.45,190.15,57.79,23.74,59.80
+DPM,BeeGFS 8n,443.72,144.53,14.59,20.50,17.86,148.45,6.27,18.58,56.13

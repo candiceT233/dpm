@@ -4,6 +4,11 @@ This document tracks the current issues and planned improvements for the workflo
 
 ## New TODOs
 
+### 0. Improve workflow graph generation performance (current bottleneck)
+- [ ] Optimize the workflow graph generation algorithm used by SPM
+- [ ] Profile hot spots and reduce complexity and memory churn
+- [ ] Add benchmarks and a flag to enable a fast path
+
 ### 1. Add Plotting for Producer-Consumer Tasks for Paper
 - [ ] Add plotting functions that directly create publication-quality plots for producer-consumer task pairs, suitable for inclusion in papers.
 - [ ] Integrate with workflow_spm_calculator and workflow_visualization modules.
@@ -46,6 +51,16 @@ For each fix:
 ---
 
 ## Completed Issues (Previously in Priority Order)
+
+### A. Montage data loading and labeling fixes (2025-10-30) ✅
+- [x] Correct PID extraction from blk-trace filenames
+- [x] Match blk-trace files with and without ".local"
+- [x] Read new blk-trace schema fields (task_name) and set `taskName`
+- [x] Fill `taskName` from datalife JSON top-level key when blk-trace lacks it
+- [x] Avoid overwriting non-empty `taskName` during PID mapping
+- [x] Make multi-node expansion robust:
+  - Skip expansion for `num_nodes_list == [1]` and `parallelism == 1`
+  - Fill missing `parallelism` with 1 and compute sensible defaults
 
 ### 1. Make "Calculate Aggregate File Size per Node" Optional ✅
 - [x] The aggregate file size calculation is now optional via a configuration flag.

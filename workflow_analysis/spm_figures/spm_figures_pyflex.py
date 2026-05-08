@@ -1436,9 +1436,20 @@ def calculate_faasflow_runtime(runtime_data):
     print("\n" + "="*60)
     print("FAASFLOW RUNTIME CALCULATION")
     print("="*60)
-    
+
+    # Data movement times (SSD 4n) between stages; stage N.5 movement added to task N+1.
+    FAASFLOW_SSD4N_DATA_MOVEMENT_SEC = {
+        0.5: 29.37666667,   # add to stage 1 task (idfea)
+        1.5: 22.70066667,   # add to stage 2 task (single)
+        2.5: 2.766,         # add to stage 3 task (tracks)
+        3.5: 2.653666667,   # add to stage 4 task (stats)
+        4.5: 2.576,   # add to stage 5 task (idfymcs)
+        7.5: 2.744,   # add to stage 8 task (speed)
+        8.5: 32.99133333,   # add to stage 9 / final (speed)
+    }
+
     # This scheduling method prioritizes colocating tasks on the same node and on fast storage
-    faasflow_config = "SSD 4n"
+    faasflow_config = "TMPFS 4n"
     faasflow_index = runtime_data["store_conf"].index(faasflow_config)
     
     # Get all stage times
@@ -1458,11 +1469,21 @@ def calculate_faasflow_runtime(runtime_data):
     matchpf_time = stage_times.get("idfymcs+matchpf", 0) * 0.4 + stage_times.get("matchpf+robustmcs", 0) * 0.6
     robustmcs_time = stage_times.get("matchpf+robustmcs", 0) * 0.4 + stage_times.get("robustmcs+speed", 0) * 0.6
     speed_time = stage_times.get("robustmcs+speed", 0) * 0.4
+
+    # Add SSD 4n data movement time: stage N.5 added to task N+1
+    idfea_time += FAASFLOW_SSD4N_DATA_MOVEMENT_SEC[0.5]
+    single_time += FAASFLOW_SSD4N_DATA_MOVEMENT_SEC[1.5]
+    tracks_time += FAASFLOW_SSD4N_DATA_MOVEMENT_SEC[2.5]
+    stats_time += FAASFLOW_SSD4N_DATA_MOVEMENT_SEC[3.5]
+    idfymcs_time += FAASFLOW_SSD4N_DATA_MOVEMENT_SEC[4.5]
+    speed_time += FAASFLOW_SSD4N_DATA_MOVEMENT_SEC[7.5] + FAASFLOW_SSD4N_DATA_MOVEMENT_SEC[8.5]
     
-    total_time = sum(stage_times.values())
+    data_movement_total = sum(FAASFLOW_SSD4N_DATA_MOVEMENT_SEC.values())
+    total_time = sum(stage_times.values()) + data_movement_total
     
     print(f"Using {faasflow_config} for all stages:")
-    print("Per-task runtime breakdown:")
+    print(f"SSD data movement (stages 0.5-4.5, 7.5, 8.5, added to tasks 1-5 and 8): {data_movement_total:.2f} seconds")
+    print("Per-task runtime breakdown (includes data movement):")
     if idfea_time > 0:
         print(f"  idfea:      {idfea_time:.2f} seconds")
     if single_time > 0:
@@ -1591,6 +1612,16 @@ def calculate_dfmann_runtime(runtime_data):
     print("DFMAN RUNTIME CALCULATION")
     print("="*60)
 
+    # Data movement times (16 SSD) between stages 1-5 only (sec); stage N.5 movement added to task N+1.
+    # Stages 5-9 are on BeeGFS, so no data movement time added for those.
+    DFMAN_SSD16_DATA_MOVEMENT_SEC = {
+        0.5: 29.40133333,   # add to stage 1 task (idfea)
+        1.5: 22.70066667,   # add to stage 2 task (single)
+        2.5: 2.766,         # add to stage 3 task (tracks)
+        3.5: 2.653666667,         # add to stage 4 task (stats)
+        4.5: 2.576,   # add to stage 5 task (idfymcs)
+    }
+
     # Stages on Local SSD (single consumers):
     # Stage 1 (idfea): Outputs consumed only by Stage 2 (trksg)
     # Stage 2 (trksg): Outputs consumed only by Stage 3 (gettr)
@@ -1606,7 +1637,7 @@ def calculate_dfmann_runtime(runtime_data):
 
     # use mixed SSD and BeeGFS for stages
     # for stage 1-5, use SSD 16n
-    dfman_1to5_config = "SSD 16n"
+    dfman_1to5_config = "TMPFS 16n"
     dfman_1to5_index = runtime_data["store_conf"].index(dfman_1to5_config)
     # for stage 6-9, use BeeGFS 16n
     dfman_6to9_config = "BeeGFS 16n"
@@ -1631,12 +1662,21 @@ def calculate_dfmann_runtime(runtime_data):
     matchpf_time = stage_times.get("idfymcs+matchpf", 0) * 0.4 + stage_times.get("matchpf+robustmcs", 0) * 0.6
     robustmcs_time = stage_times.get("matchpf+robustmcs", 0) * 0.4 + stage_times.get("robustmcs+speed", 0) * 0.6
     speed_time = stage_times.get("robustmcs+speed", 0) * 0.4
+
+    # Add SSD data movement time between stages 1-5 to the consuming task
+    idfea_time += DFMAN_SSD16_DATA_MOVEMENT_SEC[0.5]
+    single_time += DFMAN_SSD16_DATA_MOVEMENT_SEC[1.5]
+    tracks_time += DFMAN_SSD16_DATA_MOVEMENT_SEC[2.5]
+    stats_time += DFMAN_SSD16_DATA_MOVEMENT_SEC[3.5]
+    idfymcs_time += DFMAN_SSD16_DATA_MOVEMENT_SEC[4.5]
     
-    total_time = sum(stage_times.values())
+    data_movement_total = sum(DFMAN_SSD16_DATA_MOVEMENT_SEC.values())
+    total_time = sum(stage_times.values()) + data_movement_total
     
     print(f"Using {dfman_1to5_config} for stages 1-5:")
     print(f"Using {dfman_6to9_config} for stages 6-9:")
-    print("Per-task runtime breakdown:")
+    print(f"SSD data movement (stages 0.5-4.5, added to tasks 1-5): {data_movement_total:.2f} seconds")
+    print("Per-task runtime breakdown (includes data movement for tasks 1-5):")
     if idfea_time > 0:
         print(f"  idfea:      {idfea_time:.2f} seconds")
     if single_time > 0:
@@ -1703,21 +1743,21 @@ def calculate_dfmann_runtime(runtime_data):
     # return total_time
 
 def calculate_dpm_runtime(runtime_data):
-    """Calculate total workflow runtime using DPM scheduling configuration (TMPFS)"""
+    """Calculate total workflow runtime using DPM scheduling configuration (BeeGFS 8n)"""
     print("\n" + "="*60)
-    print("DPM RUNTIME CALCULATION (TMPFS)")
+    print("DPM RUNTIME CALCULATION (BeeGFS 8n)")
     print("="*60)
     
-    # DPM uses TMPFS for all tasks (use TMPFS 16n as representative)
-    tmpfs_config = "TMPFS 16n"
-    tmpfs_index = runtime_data["store_conf"].index(tmpfs_config)
+    # DPM chooses BeeGFS 8n for Pyflextrkr (avoids TMPFS due to data movement cost)
+    dpm_config = "BeeGFS 8n"
+    dpm_index = runtime_data["store_conf"].index(dpm_config)
     
     # Get all stage times
     stage_times = {}
     for stage in runtime_data.keys():
         if stage == "store_conf":
             continue
-        stage_times[stage] = runtime_data[stage][tmpfs_index]
+        stage_times[stage] = runtime_data[stage][dpm_index]
     
     # Estimate per-task times from producer-consumer pairs
     idfea_time = stage_times.get("idfea+single", 0) * 0.6
@@ -1731,7 +1771,7 @@ def calculate_dpm_runtime(runtime_data):
     
     total_time = sum(stage_times.values())
     
-    print(f"Using {tmpfs_config} for all stages:")
+    print(f"Using {dpm_config} for all stages:")
     print("Per-task runtime breakdown:")
     if idfea_time > 0:
         print(f"  idfea:      {idfea_time:.2f} seconds")
@@ -1771,7 +1811,7 @@ def calculate_dpm_runtime(runtime_data):
     
     return {
         'method': 'DPM',
-        'storage_config': tmpfs_config,
+        'storage_config': dpm_config,
         'total_runtime': total_time,
         'tasks': tasks_dict
     }

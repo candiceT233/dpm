@@ -15,7 +15,7 @@ def make_sample_wf_df():
         'numNodes': [2, 2, 2, 2, 2],
         'tasksPerNode': [1, 1, 1, 1, 1],
         'trMiB': [100, 100, 200, 200, 200],
-        'storageType': [5, 5, 5, 5, 5],
+        'storageType': ['beegfs', 'beegfs', 'beegfs', 'beegfs', 'beegfs'],
         'opCount': [2, 2, 1, 1, 1],
         'taskName': ['A', 'A', 'B', 'B', 'C'],
         'taskPID': ['p1', 'p2', 'p3', 'p4', 'p5'],

@@ -179,7 +179,7 @@ def insert_data_staging_rows(wf_df: pd.DataFrame, debug: bool = False) -> pd.Dat
                     print(f"Added virtual 'none' operation for task {taskName}: {row}")
 
     # 1c. Add "none" operations for ALL stage_out tasks (virtual consumers for every task)
-    # This ensures every task has a stage_out-{taskName} with operation "none"
+    # This ensures every task has a {taskName}-stage_out with operation "none"
     for taskName, group in wf_df.groupby('taskName'):
         # Skip if taskName already contains 'stage_out' or 'stage_in'
         if 'stage_out' in taskName or 'stage_in' in taskName:
@@ -211,7 +211,7 @@ def insert_data_staging_rows(wf_df: pd.DataFrame, debug: bool = False) -> pd.Dat
                     'trMiB': 1.0,  # Dummy transfer rate to avoid division by zero
                     'storageType': 'beegfs',  # Virtual consumer storage type
                     'opCount': parallelism,
-                    'taskName': f'stage_out-{taskName}',  # Virtual consumer task name matching expected pattern
+                    'taskName': f'{taskName}-stage_out',  # Virtual consumer task name matching expected pattern
                     'taskPID': '',
                     'fileName': ','.join(file_names),
                     'stageOrder': stageOrder + 0.5,  # Stage-out operations after the actual task
@@ -281,7 +281,7 @@ def insert_data_staging_rows(wf_df: pd.DataFrame, debug: bool = False) -> pd.Dat
                         'trMiB': '',
                         'storageType': storageType,
                         'opCount': parallelism,
-                        'taskName': f'stage_out-{taskName}',
+                        'taskName': f'{taskName}-stage_out',
                         'taskPID': '',
                         'fileName': ','.join(file_names),
                         'stageOrder': stageOrder + 0.5,
@@ -323,7 +323,7 @@ def insert_data_staging_rows(wf_df: pd.DataFrame, debug: bool = False) -> pd.Dat
                             'trMiB': 1.0,  # Dummy transfer rate to avoid division by zero
                             'storageType': 'beegfs',
                             'opCount': parallelism,
-                            'taskName': f'stage_out-{taskName}',
+                            'taskName': f'{taskName}-stage_out',
                             'taskPID': '',
                             'fileName': ','.join(file_names),
                             'stageOrder': stageOrder + 0.5,
@@ -345,15 +345,15 @@ def insert_data_staging_rows(wf_df: pd.DataFrame, debug: bool = False) -> pd.Dat
                             'trMiB': '',
                             'storageType': storageType,
                             'opCount': parallelism,
-                            'taskName': f'stage_out-{taskName}',
+                            'taskName': f'{taskName}-stage_out',
                             'taskPID': '',
                             'fileName': ','.join(file_names),
                             'stageOrder': stageOrder + 0.5,
                             'prevTask': taskName
                         }
-                        staging_rows.append(row)
-                        if debug:
-                            print(f"Added stage_out row for write op: {row}")
+                    staging_rows.append(row)
+                    if debug:
+                        print(f"Added stage_out row for write op: {row}")
 
     # 3. Final data movement (last stage)
     max_stage = wf_df['stageOrder'].max()
@@ -361,43 +361,48 @@ def insert_data_staging_rows(wf_df: pd.DataFrame, debug: bool = False) -> pd.Dat
     if debug:
         print(f"Final data movement: {len(last_rows)} rows found for stageOrder {max_stage}.")
     if not last_rows.empty:
-        file_groups = get_file_groups(last_rows)
-        numNodesList = last_rows['numNodesList'].iloc[0] if 'numNodesList' in last_rows.columns else [1]
-        if isinstance(numNodesList, str):
-            try:
-                numNodesList = eval(numNodesList)
-            except Exception:
-                numNodesList = [int(numNodesList)]
-        for storageType in ['tmpfs-beegfs', 'ssd-beegfs', 'beegfs']:
-            for file_names, agg_size, parallelism, group in file_groups:
-                for numNodes in numNodesList:
-                    if storageType == 'beegfs':
-                        row = {
-                            'operation': 'none',  # No operation for virtual stage_out
-                            'randomOffset': 0,
-                            'transferSize': fsblocksize,
-                            'aggregateFilesizeMB': agg_size,
-                            'numTasks': parallelism,
-                            'parallelism': parallelism,
-                            'totalTime': 0,  # No time (virtual)
-                            'numNodesList': numNodesList,
-                            'numNodes': numNodes,
-                            'tasksPerNode': int(np.ceil(parallelism / numNodes)),
-                            'trMiB': 1.0,  # Dummy transfer rate to avoid division by zero
-                            'storageType': 'beegfs',
-                            'opCount': parallelism,
-                            'taskName': f'stage_out-{taskName}',
-                            'taskPID': '',
-                            'fileName': ','.join(file_names),
-                            'stageOrder': stageOrder + 0.5,
-                            'prevTask': taskName
-                        }
-                    else:
-                
-                        # Skip if taskName already contains 'stage_out' or 'stage_in'
-                        for taskName in last_rows['taskName'].unique():
-                            if 'stage_out' in taskName or 'stage_in' in taskName:
-                                continue
+        # Iterate per task to avoid leaking taskName/stageOrder from outer scopes
+        for last_taskName, last_task_group in last_rows.groupby('taskName'):
+            # Skip rows that already represent staging tasks
+            if 'stage_out' in last_taskName or 'stage_in' in last_taskName:
+                continue
+
+            file_groups = get_file_groups(last_task_group)
+            numNodesList = (
+                last_task_group['numNodesList'].iloc[0]
+                if 'numNodesList' in last_task_group.columns else [1]
+            )
+            if isinstance(numNodesList, str):
+                try:
+                    numNodesList = eval(numNodesList)
+                except Exception:
+                    numNodesList = [int(numNodesList)]
+
+            for storageType in ['tmpfs-beegfs', 'ssd-beegfs', 'beegfs']:
+                for file_names, agg_size, parallelism, group in file_groups:
+                    for numNodes in numNodesList:
+                        if storageType == 'beegfs':
+                            row = {
+                                'operation': 'none',  # No operation for virtual stage_out
+                                'randomOffset': 0,
+                                'transferSize': fsblocksize,
+                                'aggregateFilesizeMB': agg_size,
+                                'numTasks': parallelism,
+                                'parallelism': parallelism,
+                                'totalTime': 0,  # No time (virtual)
+                                'numNodesList': numNodesList,
+                                'numNodes': numNodes,
+                                'tasksPerNode': int(np.ceil(parallelism / numNodes)),
+                                'trMiB': 1.0,  # Dummy transfer rate to avoid division by zero
+                                'storageType': 'beegfs',
+                                'opCount': parallelism,
+                                'taskName': f'{last_taskName}-stage_out',
+                                'taskPID': '',
+                                'fileName': ','.join(file_names),
+                                'stageOrder': max_stage + 0.5,
+                                'prevTask': last_taskName,
+                            }
+                        else:
                             row = {
                                 'operation': 'cp',
                                 'randomOffset': 0,
@@ -412,15 +417,15 @@ def insert_data_staging_rows(wf_df: pd.DataFrame, debug: bool = False) -> pd.Dat
                                 'trMiB': '',
                                 'storageType': storageType,
                                 'opCount': parallelism,
-                                'taskName': f'stage_out-{taskName}',
+                                'taskName': f'{last_taskName}-stage_out',
                                 'taskPID': '',
                                 'fileName': ','.join(file_names),
                                 'stageOrder': max_stage + 0.5,
-                                'prevTask': taskName,
+                                'prevTask': last_taskName,
                             }
-                            staging_rows.append(row)
-                            if debug:
-                                print(f"Added final data movement row: {row}")
+                        staging_rows.append(row)
+                        if debug:
+                            print(f"Added final data movement row: {row}")
 
     # Combine and sort
     staging_df = pd.DataFrame(staging_rows)
