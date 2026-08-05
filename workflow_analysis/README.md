@@ -34,6 +34,21 @@ python3 workflow_analyzer.py analysis_data/ddmd_4n_l_workflow_data.csv
 cd workflow_analysis && jupyter notebook workflow_analysis.ipynb
 ```
 
+### PyflexTRKR DPM Selection Audit
+
+The PyflexTRKR paper evaluation uses the SPM/DPM scores in
+`workflow_analysis/spm_figures/spm_figures_pyflex.py` to select the uniform
+storage-parallelism configuration. To reproduce that selection without running
+the plotting script or relying on the stale runtime-summary CSV, run from the
+repository root:
+
+```bash
+python workflow_analysis/derive_pyflex_dpm_selection.py --expect "BeeGFS 8n"
+```
+
+The script reports summed SPM values for each uniform configuration and exits
+non-zero if the selected configuration differs from the expected value.
+
 ### Option 4: Using Individual Modules
 ```python
 from modules import (
